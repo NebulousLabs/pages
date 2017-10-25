@@ -26,20 +26,20 @@ func TestInsertPage(t *testing.T) {
 		if err != nil {
 			t.Errorf("Failed to allocate page: %v", err)
 		}
-		table, err = table.InsertPage(uint64(i), pp, pt.pm)
+		table, err = table.insertPage(uint64(i), pp, pt.pm)
 		if err != nil {
 			t.Errorf("Inserting page failed: %v", err)
 		}
 	}
 
-	// The table should be the root, have height 1 and numPageEntries height 0 tables
+	// The table should be the root, have height 1 and numPageEntries height, 0 tables
 	if table.parent != nil {
 		t.Error("root table should be root but has a parent")
 	}
 	if table.height != 1 {
 		t.Errorf("root table height should be %v but was %v", 1, table.height)
 	}
-	if len(table.childTables) != numPageEntries {
+	if len(table.childTables) != 2 {
 		t.Errorf("root table should have %v elements in childTables but has %v",
 			numPageEntries, len(table.childTables))
 	}
@@ -76,13 +76,30 @@ func TestMarshalLoad(t *testing.T) {
 	if err != nil {
 		t.Error("Failed to write data to the entry")
 	}
-	if len(entry.pt.childPages) != numPages {
+	if len(entry.ep.root.childPages) != numPages {
 		t.Errorf("PageTable should contain %v pages but has %v",
-			numPages, len(entry.pt.childPages))
+			numPages, len(entry.ep.root.childPages))
 	}
 
-	// Save the underlying pagetable to disk
-	if err := entry.pt.writeToDisk(); err != nil {
-		t.Errorf("Failed to write pageTable to disk: %v", err)
+	// Marshal the underlying root table
+	data, err := entry.ep.root.Marshal()
+	if err != nil {
+		t.Errorf("Failed to marshal pageTable: %v", err)
+	}
+
+	// Unmarshal the data and compare
+	entries, err := unmarshalPageTable(data)
+	if err != nil {
+		t.Errorf("Failed to unmarshal pageTable: %v", err)
+	}
+	if len(entries) != len(entry.ep.root.childPages) {
+		t.Errorf("wrong length. expected %v but was %v",
+			len(entry.ep.root.childTables), len(entries))
+	}
+	for i, offset := range entries {
+		if offset != entry.ep.root.childPages[uint64(i)].fileOff {
+			t.Errorf("offset should have been %v but was %v",
+				entry.ep.root.childPages[uint64(i)].fileOff, offset)
+		}
 	}
 }

@@ -14,8 +14,8 @@ type (
 		// pm is a pointer to the PageManager that created this Entry
 		pm *PageManager
 
-		// pt is the pageTable for this entry
-		pt *pageTable
+		// ep is the tiered entryPage for this entry
+		ep *entryPage
 
 		// pages is a list of the physical pages that are used to store the
 		// data of this entry
@@ -87,6 +87,10 @@ func (e *Entry) Write(p []byte) (int, error) {
 	// Get the amount of bytes the caller would like to write
 	bytesToWrite := int64(len(p))
 
+	// Inform the entryPage about new pages and the increase data usage
+	byteIncrease := int64(0)
+	addedPages := make([]*physicalPage, 0)
+
 	// Write until all the bytes are written. If necessary allocate new pages
 	writeCursor := 0
 	for bytesToWrite > 0 {
@@ -96,17 +100,18 @@ func (e *Entry) Write(p []byte) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			// Add it to the list of pages and the pageTable
+			// Add it to the list of pages and addedPages
+			addedPages = append(addedPages, newPage)
 			e.pages = append(e.pages, newPage)
-			e.pt, err = e.pt.InsertPage(uint64(len(e.pages)-1), newPage, e.pm)
-			if err != nil {
-				build.ExtendErr("Failed to insert new page", err)
-			}
 			continue
 		}
 
-		// Write parts of the data to the page
-		bytesWritten, err := e.pages[e.cursorPage].writeAt(p[writeCursor:], e.cursorOff)
+		// Write parts of the data to the page and remember the size increase
+		// of the page
+		page := e.pages[e.cursorPage]
+		usedPageSize := page.usedSize
+		bytesWritten, err := page.writeAt(p[writeCursor:], e.cursorOff)
+		byteIncrease += (page.usedSize - usedPageSize)
 		if err != nil {
 			return 0, err
 		}
@@ -121,6 +126,11 @@ func (e *Entry) Write(p []byte) (int, error) {
 		// Increment the writeCursor of the input data
 		writeCursor += bytesWritten
 	}
+	err := e.ep.addPages(addedPages, byteIncrease)
+	if err != nil {
+		return 0, build.ExtendErr("failed to add pages to entryPage", err)
+	}
+
 	return len(p), nil
 }
 

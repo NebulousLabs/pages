@@ -1,11 +1,14 @@
 package pages
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/NebulousLabs/Sia/build"
+	"github.com/NebulousLabs/fastrand"
 )
 
 // pagingTester is a helper object to simplify testing
@@ -78,5 +81,62 @@ func TestAllocatePage(t *testing.T) {
 			t.Errorf("Page %v has wrong offset. Was %v, but should be %v",
 				i, pages[i].fileOff, i*pageSize+dataOff)
 		}
+	}
+}
+
+// TestRecovery tests if the data is still available after closing the
+// pagemanager and reloading it
+func TestRecovery(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry, identifier, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write numPages pages worth of data to the entry
+	numPages := 10
+	data := fastrand.Bytes(numPages * pageSize)
+	_, err = entry.Write(data)
+	if err != nil {
+		t.Error("Failed to write data to the entry")
+	}
+
+	// The root table should contain numPages children
+	if len(entry.ep.root.childPages) != numPages {
+		t.Errorf("Entry should have %v children but had %v", numPages, len(entry.ep.root.childPages))
+	}
+
+	// Open the entry again
+	entry, err = pt.pm.Open(identifier)
+	if err != nil {
+		t.Errorf("Failed to open the entery: %v", err)
+	}
+
+	// Check if the entry contains the right number of pages
+	if len(entry.pages) != numPages {
+		t.Errorf("entry should contain %v pages but only had %v", numPages, len(entry.pages))
+	}
+
+	// Read the previously written data and compare it
+	readData := make([]byte, len(data))
+	if _, err := entry.Read(readData); err != nil {
+		t.Errorf("Failed to read data: %v", err)
+		t.Logf("numPages %v", len(entry.pages))
+	}
+	if bytes.Compare(data, readData) != 0 {
+		t.Errorf("Read data doesn't match written data")
+	}
+
+	// Check if the length of the entry matches the data's length
+	length, err := entry.Seek(0, io.SeekEnd)
+	if err != nil {
+		t.Error(err)
+	}
+	if length != int64(len(data)) {
+		t.Errorf("length should be %v but was %v", len(data), length)
 	}
 }
