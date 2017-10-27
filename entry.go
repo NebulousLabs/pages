@@ -35,8 +35,8 @@ func (Entry) Close() error {
 	return nil
 }
 
-// Read tries to read len(p) bytes from the current cursor position
-func (e *Entry) Read(p []byte) (n int, err error) {
+// read is a helper function that reads at a specific cursorPage and offset
+func (e *Entry) read(p []byte, cursorPage *int64, cursorOff *int64) (n int, err error) {
 	if len(e.pages) == 0 {
 		return 0, io.EOF
 	}
@@ -50,20 +50,20 @@ func (e *Entry) Read(p []byte) (n int, err error) {
 	readData := make([]byte, bytesToRead)
 	for bytesToRead > 0 {
 		// Abort if no more pages are left to read
-		if e.cursorPage >= int64(len(e.pages)) {
+		if *cursorPage >= int64(len(e.pages)) {
 			break
 		}
 
 		// Read the data from the page
 		var bytesRead int
-		bytesRead, err = e.pages[e.cursorPage].readAt(readData, e.cursorOff)
+		bytesRead, err = e.pages[*cursorPage].readAt(readData, *cursorOff)
 		if err != nil {
 			return 0, err
 		}
 
 		// Adjust the remaining bytesToRead and the cursor position
 		bytesToRead -= int64(bytesRead)
-		_, err = e.Seek(int64(bytesRead), io.SeekCurrent)
+		err = e.seek(int64(bytesRead), cursorPage, cursorOff)
 		if err != nil {
 			return
 		}
@@ -81,24 +81,47 @@ func (e *Entry) Read(p []byte) (n int, err error) {
 	return copyDest, nil
 }
 
-// ReadAt reads from a specific offset
-func (e *Entry) ReadAt(p []byte, off int64) (n int, err error) {
-	// Remember the cursor position
-	tmpCursorPage := e.cursorPage
-	tmpPageOff := e.cursorOff
+// Read tries to read len(p) bytes from the current cursor position
+func (e *Entry) Read(p []byte) (n int, err error) {
+	return e.read(p, &e.cursorPage, &e.cursorOff)
+}
 
-	// Seek to the position from which we would like to read
-	if _, err := e.Seek(off, io.SeekStart); err != nil {
+// ReadAt reads from a specific offset
+func (e *Entry) ReadAt(p []byte, off int64) (int, error) {
+	// Seek to the offset from the beginning of the file
+	cursorPage := int64(0)
+	cursorOff := int64(0)
+	if err := e.seek(off, &cursorPage, &cursorOff); err != nil {
 		return 0, err
 	}
 
 	// Read the data
-	n, err = e.Read(p)
+	return e.read(p, &cursorPage, &cursorOff)
+}
 
-	// Restore the cursor position
-	e.cursorPage = tmpCursorPage
-	e.cursorOff = tmpPageOff
-	return
+// seek is a helper function that seeks a specific offset starting at a
+// specified cursorPage and cursorOffset. It doesn't modify the Entry's fields
+// but instead the input values
+func (e *Entry) seek(offset int64, cursorPage *int64, cursorOff *int64) error {
+	// Don't allow to seek before start of file
+	if *cursorPage*pageSize+*cursorOff+offset < 0 {
+		return errors.New("Cannot set cursor to negative position")
+	}
+
+	cursorPageNew := (*cursorPage*pageSize + *cursorOff + offset) / pageSize
+	cursorOffNew := (*cursorPage*pageSize + *cursorOff + offset) % pageSize
+
+	// If the page number is higher than the number of available pages set it to
+	// the number of available pages at offset 0 to signal other functions that
+	// we cannot continue reading
+	if cursorPageNew >= int64(len(e.pages)) {
+		cursorPageNew = int64(len(e.pages))
+		cursorOffNew = 0
+	}
+
+	*cursorPage = cursorPageNew
+	*cursorOff = cursorOffNew
+	return nil
 }
 
 // Seek moves the cursor for reading and writing to the appropriate page and
@@ -120,24 +143,14 @@ func (e *Entry) Seek(offset int64, whence int) (int64, error) {
 		pageOff = 0
 	}
 
-	// Don't allow to seek before start of file
-	if pageNum*pageSize+pageOff+offset < 0 {
-		return 0, errors.New("Cannot set cursor to negative position")
+	err := e.seek(offset, &pageNum, &pageOff)
+	if err != nil {
+		return 0, err
 	}
 
-	pageNumNew := (pageNum*pageSize + pageOff + offset) / pageSize
-	pageOffNew := (pageNum*pageSize + pageOff + offset) % pageSize
+	e.cursorPage = pageNum
+	e.cursorOff = pageOff
 
-	// If the page number is higher than the number of available pages set it to
-	// the number of available pages at offset 0 to signal other functions that
-	// we cannot continue reading
-	if pageNumNew >= int64(len(e.pages)) {
-		pageNumNew = int64(len(e.pages))
-		pageOffNew = 0
-	}
-
-	e.cursorPage = pageNumNew
-	e.cursorOff = pageOffNew
 	return e.cursorPage*pageSize + e.cursorOff, nil
 }
 
@@ -239,8 +252,8 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 	panic("sanity check failed. height can't be a negative value.")
 }
 
-// Write tries to write len(p) byte to the current cursor position
-func (e *Entry) Write(p []byte) (int, error) {
+// write is a helper function that writes at a specific cursorPage and offset
+func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error) {
 	// Get the amount of bytes the caller would like to write
 	bytesToWrite := int64(len(p))
 
@@ -251,7 +264,7 @@ func (e *Entry) Write(p []byte) (int, error) {
 	// Write until all the bytes are written. If necessary allocate new pages
 	writeCursor := 0
 	for bytesToWrite > 0 {
-		if e.cursorPage >= int64(len(e.pages)) {
+		if *cursorPage >= int64(len(e.pages)) {
 			// Allocate new page if necessary
 			newPage, err := e.pm.managedAllocatePage()
 			if err != nil {
@@ -265,9 +278,9 @@ func (e *Entry) Write(p []byte) (int, error) {
 
 		// Write parts of the data to the page and remember the size increase
 		// of the page
-		page := e.pages[e.cursorPage]
+		page := e.pages[*cursorPage]
 		usedPageSize := page.usedSize
-		bytesWritten, err := page.writeAt(p[writeCursor:], e.cursorOff)
+		bytesWritten, err := page.writeAt(p[writeCursor:], *cursorOff)
 		byteIncrease += (page.usedSize - usedPageSize)
 		if err != nil {
 			return 0, err
@@ -275,7 +288,7 @@ func (e *Entry) Write(p []byte) (int, error) {
 
 		// Adjust the remaining bytesToWrite and the cursor position
 		bytesToWrite -= int64(bytesWritten)
-		_, err = e.Seek(int64(bytesWritten), io.SeekCurrent)
+		err = e.seek(int64(bytesWritten), cursorPage, cursorOff)
 		if err != nil {
 			return 0, err
 		}
@@ -291,21 +304,20 @@ func (e *Entry) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Write tries to write len(p) byte to the current cursor position
+func (e *Entry) Write(p []byte) (int, error) {
+	return e.write(p, &e.cursorPage, &e.cursorOff)
+}
+
 // WriteAt writes to a specific offset
 func (e *Entry) WriteAt(p []byte, off int64) (n int, err error) {
-	// Remember the cursor position
-	tmpCursorPage := e.cursorPage
-	tmpPageOff := e.cursorOff
-
-	if _, err := e.Seek(off, io.SeekStart); err != nil {
+	// Seek to the offset from the beginning of the file
+	cursorPage := int64(0)
+	cursorOff := int64(0)
+	if err := e.seek(off, &cursorPage, &cursorOff); err != nil {
 		return 0, err
 	}
 
 	// Write data
-	n, err = e.Write(p)
-
-	// Restore the cursor position
-	e.cursorPage = tmpCursorPage
-	e.cursorOff = tmpPageOff
-	return
+	return e.write(p, &cursorPage, &cursorOff)
 }
