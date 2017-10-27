@@ -73,12 +73,9 @@ func (p *PageManager) allocatePage() (*physicalPage, error) {
 	return newPage, nil
 }
 
-// managedAllocatePage either returns a free page or allocates a page and adds
-// it to the pages map.
-func (p *PageManager) managedAllocatePage() (*physicalPage, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.allocatePage()
+// Close closes open handles and frees ressources
+func (p PageManager) Close() error {
+	return p.file.Close()
 }
 
 // Create creates a new Entry and returns an identifier for it
@@ -101,9 +98,50 @@ func (p *PageManager) Create() (*Entry, Identifier, error) {
 	return newEntry, Identifier(ep.pp.fileOff), nil
 }
 
-// Close closes open handles and frees ressources
-func (p PageManager) Close() error {
-	return p.file.Close()
+// loadFreePagesFromDisk loads the offsets of free pages from the first page of
+// the file.
+func (p *PageManager) loadFreePagesFromDisk() error {
+	// Read the whole page. We need to check for EOF in case the filesize is
+	// smaller than pageSize which might happen if the PageManager is created
+	// and closed before writing any files to it other than the initial free
+	// pages
+	pageData := make([]byte, pageSize)
+	if n, err := p.file.ReadAt(pageData, freePagesOffset); err != nil && !(err == io.EOF && n > 0) {
+		return err
+	}
+
+	// Create buffer from the pages data and read the number of entries
+	buffer := bytes.NewBuffer(pageData)
+	numEntries := uint64(0)
+	if err := binary.Read(buffer, binary.LittleEndian, &numEntries); err != nil {
+		return err
+	}
+
+	var offset int64
+	for i := uint64(0); i < numEntries; i++ {
+		// Unmarshal page offset
+		if err := binary.Read(buffer, binary.LittleEndian, &offset); err != nil {
+			return err
+		}
+
+		// Create physicalPage object
+		pp := &physicalPage{
+			file:    p.file,
+			fileOff: offset,
+		}
+
+		// Append it to the pageManager
+		p.freePages = append(p.freePages, pp)
+	}
+	return nil
+}
+
+// managedAllocatePage either returns a free page or allocates a page and adds
+// it to the pages map.
+func (p *PageManager) managedAllocatePage() (*physicalPage, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.allocatePage()
 }
 
 // New creates a PageManager or recovers an existing one
@@ -197,41 +235,6 @@ func (p *PageManager) Open(id Identifier) (*Entry, error) {
 	return newEntry, nil
 }
 
-// loadFreePagesFromDisk loads the offsets of free pages from the first page of
-// the file.
-func (p *PageManager) loadFreePagesFromDisk() error {
-	// Read the whole page
-	pageData := make([]byte, pageSize)
-	if _, err := p.file.ReadAt(pageData, freePagesOffset); err != nil {
-		return err
-	}
-
-	// Create buffer from the pages data and read the number of entries
-	buffer := bytes.NewBuffer(pageData)
-	numEntries := uint64(0)
-	if err := binary.Read(buffer, binary.LittleEndian, &numEntries); err != nil {
-		return err
-	}
-
-	var offset int64
-	for i := uint64(0); i < numEntries; i++ {
-		// Unmarshal page offset
-		if err := binary.Read(buffer, binary.LittleEndian, &offset); err != nil {
-			return err
-		}
-
-		// Create physicalPage object
-		pp := &physicalPage{
-			file:    p.file,
-			fileOff: offset,
-		}
-
-		// Append it to the pageManager
-		p.freePages = append(p.freePages, pp)
-	}
-	return nil
-}
-
 // writeFreePagesToDisk writes the offsets of the freePages of the pageManager
 // to disk on the first page of the file
 func (p *PageManager) writeFreePagesToDisk() error {
@@ -256,8 +259,8 @@ func (p *PageManager) writeFreePagesToDisk() error {
 	}
 
 	// Sanity check buffer length
-	if buffer.Len() > maxFreePagesStored {
-		panic("Sanity check failed. Too many free pages in buffer")
+	if buffer.Len() > pageSize {
+		panic("Sanity check failed. Buffer length larger than filesize")
 	}
 
 	// Write buffer to disk

@@ -213,7 +213,7 @@ func TestEntryWrite(t *testing.T) {
 	}
 
 	// Write a few times the number of pageSize to the entry
-	pages := 3
+	pages := 10000
 	entryData := fastrand.Bytes(pages * pageSize)
 	n, err := entry.Write(entryData)
 	if n != pages*pageSize || err != nil {
@@ -254,5 +254,73 @@ func TestEntryWrite(t *testing.T) {
 	if entry.cursorPage != cursorPage || entry.cursorOff != cursorOff {
 		t.Errorf("Cursor position was moved during WriteAt. Was %v/%v but should be %v/%v",
 			entry.cursorPage, entry.cursorOff, cursorPage, cursorOff)
+	}
+}
+
+// TestTruncate tests the functionality of the Entry's Truncate method
+func TestTruncate(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get a new entry
+	entry, _, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a few times the number of pageSize to the entry
+	pages := 10000
+	entryData := fastrand.Bytes(pages * pageSize)
+	n, err := entry.Write(entryData)
+	if n != pages*pageSize || err != nil {
+		t.Errorf("%v bytes were written to the page: %v", n, err)
+	}
+
+	// The used size should be pages * pageSize
+	if entry.ep.usedSize != int64(pages*pageSize) {
+		t.Errorf("usedSize should be %v but was %v", pages*pageSize, entry.ep.usedSize)
+	}
+
+	// Truncate the file
+	truncatedSize := int64(15000)
+	if err := entry.Truncate(truncatedSize); err != nil {
+		t.Errorf("Truncate failed %v", err)
+	}
+
+	// Make sure the usedSize was adjusted
+	if entry.ep.usedSize != truncatedSize {
+		t.Errorf("usedSize should be %v but was %v", truncatedSize, entry.ep.usedSize)
+	}
+
+	// Check if the number of remaining pages in the entry is ok
+	expectedPages := truncatedSize/pageSize + 1
+	if int64(len(entry.pages)) != expectedPages {
+		t.Errorf("len(entry.pages) should be %v but was %v", expectedPages, len(entry.pages))
+	}
+
+	// The remaining pages should be in the freePages slice
+	freedPageTables := int64(pages / numPageEntries)
+	if int64(len(pt.pm.freePages)) != int64(pages)-expectedPages+freedPageTables {
+		t.Errorf("there should be %v free pages but there are %v",
+			int64(pages)-expectedPages+freedPageTables, len(pt.pm.freePages))
+	}
+
+	// Make sure the data wasn't corrupted
+	readData := make([]byte, truncatedSize)
+	if _, err := entry.Seek(0, io.SeekStart); err != nil {
+		t.Errorf("Failed to seek the start of the truncated data: %v", err)
+	}
+	if _, err := entry.Read(readData); err != nil {
+		t.Errorf("Failed to read truncated data: %v", err)
+	}
+	if bytes.Compare(entryData[:truncatedSize], readData) != 0 {
+		t.Error("Data is corrupted after truncating it")
+	}
+
+	// The next read should fail with EOF
+	if _, err := entry.Read(readData); err != io.EOF {
+		t.Errorf("Read didn't fail with EOF: %v", err)
 	}
 }

@@ -76,9 +76,9 @@ func TestMarshalLoad(t *testing.T) {
 	if err != nil {
 		t.Error("Failed to write data to the entry")
 	}
-	if len(entry.ep.root.childPages) != numPages {
+	if totalPages(entry.ep.root) != uint64(numPages) {
 		t.Errorf("PageTable should contain %v pages but has %v",
-			numPages, len(entry.ep.root.childPages))
+			numPages, totalPages(entry.ep.root))
 	}
 
 	// Marshal the underlying root table

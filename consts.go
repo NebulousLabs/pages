@@ -22,6 +22,6 @@ const (
 	freePagesOffset = 0
 
 	// maxFreePagesStored is the maximum amount of free pages that can be
-	// persisted on disk. 
-	maxFreePagesStored = pageSize/8 - 8
+	// persisted on disk.
+	maxFreePagesStored = (pageSize - 8) / 8
 )

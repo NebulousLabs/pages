@@ -21,6 +21,20 @@ func (pt pagingTester) Close() error {
 	return pt.pm.Close()
 }
 
+// totalPages is a helper function that returns the number of pages in a tree of
+// pageTables
+func totalPages(pt *pageTable) uint64 {
+	if pt.height == 0 {
+		return uint64(len(pt.childPages))
+	}
+
+	var sum uint64
+	for _, child := range pt.childTables {
+		sum += totalPages(child)
+	}
+	return sum
+}
+
 // newPagingTester returns a ready-to-rock pagingTester
 func newPagingTester(name string) (*pagingTester, error) {
 	// Create temp dir
@@ -48,7 +62,7 @@ func TestAllocatePage(t *testing.T) {
 	}
 
 	// Allocate numPages pages
-	numPages := 5
+	numPages := 10000
 	pages := make([]*physicalPage, numPages)
 	for i := 0; i < numPages; i++ {
 		page, err := pt.pm.managedAllocatePage()
@@ -84,6 +98,50 @@ func TestAllocatePage(t *testing.T) {
 	}
 }
 
+// TestReadWriteFreePagesToDisk
+func TestReadWriteFreePagesToDisk(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add more free pages than the first page can actually hold
+	numPages := int64(10000)
+	freePages := make([]*physicalPage, numPages)
+	for i := int64(0); i < numPages; i++ {
+		pp := &physicalPage{
+			fileOff: i * pageSize,
+		}
+		freePages[i] = pp
+	}
+	pt.pm.freePages = freePages
+
+	// Write them to disk
+	if err := pt.pm.writeFreePagesToDisk(); err != nil {
+		t.Errorf("Failed to write free pages: %v", err)
+	}
+
+	// Delete them from memory
+	pt.pm.freePages = nil
+
+	// Load them again
+	if err := pt.pm.loadFreePagesFromDisk(); err != nil {
+		t.Errorf("Failed to load free pages: %v", err)
+	}
+
+	// Compare them
+	if len(pt.pm.freePages) != maxFreePagesStored {
+		t.Fatalf("length should be %v but was %v", maxFreePagesStored, len(pt.pm.freePages))
+	}
+	for i := int64(0); i < maxFreePagesStored; i++ {
+		if freePages[i].fileOff != pt.pm.freePages[i].fileOff {
+			t.Errorf("Fileoff was %v but should be %v",
+				pt.pm.freePages[i].fileOff, freePages[i].fileOff)
+		}
+	}
+
+}
+
 // TestRecovery tests if the data is still available after closing the
 // pagemanager and reloading it
 func TestRecovery(t *testing.T) {
@@ -98,7 +156,7 @@ func TestRecovery(t *testing.T) {
 	}
 
 	// Write numPages pages worth of data to the entry
-	numPages := 10
+	numPages := 10000
 	data := fastrand.Bytes(numPages * pageSize)
 	_, err = entry.Write(data)
 	if err != nil {
@@ -106,7 +164,7 @@ func TestRecovery(t *testing.T) {
 	}
 
 	// The root table should contain numPages children
-	if len(entry.ep.root.childPages) != numPages {
+	if totalPages(entry.ep.root) != uint64(numPages) {
 		t.Errorf("Entry should have %v children but had %v", numPages, len(entry.ep.root.childPages))
 	}
 
@@ -125,7 +183,6 @@ func TestRecovery(t *testing.T) {
 	readData := make([]byte, len(data))
 	if _, err := entry.Read(readData); err != nil {
 		t.Errorf("Failed to read data: %v", err)
-		t.Logf("numPages %v", len(entry.pages))
 	}
 	if bytes.Compare(data, readData) != 0 {
 		t.Errorf("Read data doesn't match written data")
