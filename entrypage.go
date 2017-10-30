@@ -1,8 +1,8 @@
 package pages
 
 import (
-	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 
@@ -89,21 +89,25 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 // readEntryPageEntry reads the usedBytes of a pageTable and a ptr to the
 // pageTable at a specific offset of a page from disk
 func readEntryPageEntry(pp *physicalPage, index int64) (usedBytes int64, pageOff int64, err error) {
-	// Read the data from disk and put it into a buffer
+	// Read the data from disk
 	entryData := make([]byte, entryPageEntrySize)
 	_, err = pp.readAt(entryData, index*entryPageEntrySize)
 	if err != nil {
 		return
 	}
-	buffer := bytes.NewBuffer(entryData)
 
-	// Read the usedBytes from the buffer
-	if err = binary.Read(buffer, binary.LittleEndian, &usedBytes); err != nil {
+	// Unmarshal the usedBytes
+	var bytesRead int
+	if usedBytes, bytesRead = binary.Varint(entryData[0:8]); usedBytes == 0 && bytesRead <= 0 {
+		err = errors.New("Failed to unmarshal usedBytes")
 		return
 	}
 
-	// Read the pageOff from the buffer
-	err = binary.Read(buffer, binary.LittleEndian, &pageOff)
+	// Unmarshal the pageOff
+	if pageOff, bytesRead = binary.Varint(entryData[8:]); pageOff == 0 && bytesRead <= 0 {
+		err = errors.New("Failed to unmarshal entryData")
+		return
+	}
 	return
 }
 
@@ -210,13 +214,17 @@ func recursiveRecovery(parent *pageTable, height int64, remainingBytes *int64) (
 
 // unmarshalPageTable a pageTable
 func unmarshalPageTable(data []byte) (entries []int64, err error) {
-	buffer := bytes.NewBuffer(data)
+	// The data should be at least 8 bytes long
+	if len(data) < 8 {
+		panic("input data is too shot")
+	}
+
+	// off is a offset used for unmarshaling the data
+	off := 0
 
 	// Unmarshal the number of entries in the table
-	var numEntries uint64
-	if err = binary.Read(buffer, binary.LittleEndian, &numEntries); err != nil {
-		return
-	}
+	numEntries := binary.LittleEndian.Uint64(data[0:8])
+	off += 8
 
 	// Sanity check numEntries
 	if numEntries > numPageEntries {
@@ -224,12 +232,19 @@ func unmarshalPageTable(data []byte) (entries []int64, err error) {
 			numEntries, numPageEntries))
 	}
 
+	// Sanity check the remaining data length
+	if uint64(len(data[off:])) < numEntries*8 {
+		panic(fmt.Sprintf("Sanity check failed. %v < %v", len(data[off:]), numEntries*8))
+	}
+
 	// Unmarshal the entries
-	var offset int64
 	for i := uint64(0); i < numEntries; i++ {
-		if err = binary.Read(buffer, binary.LittleEndian, &offset); err != nil {
+		offset, bytesRead := binary.Varint(data[off : off+8])
+		if offset == 0 && bytesRead <= 0 {
+			err = errors.New("Failed to unmarshal offset")
 			return
 		}
+		off += 8
 		entries = append(entries, offset)
 	}
 	return
@@ -238,17 +253,14 @@ func unmarshalPageTable(data []byte) (entries []int64, err error) {
 // writeEntryPageEntry writes the usedBytes of a pageTable and a ptr to the
 // pageTable at a specific offset in the entryPage
 func writeEntryPageEntry(pp *physicalPage, index int64, usedBytes int64, pageOff int64) error {
-	buffer := bytes.NewBuffer(make([]byte, 0))
-	if err := binary.Write(buffer, binary.LittleEndian, &usedBytes); err != nil {
-		return err
-	}
-	if err := binary.Write(buffer, binary.LittleEndian, &pageOff); err != nil {
-		return err
-	}
-	if buffer.Len() != entryPageEntrySize {
-		panic(fmt.Sprintf("pageEntry length %v != 16 bytes", buffer.Len()))
-	}
-	if _, err := pp.writeAt(buffer.Bytes(), index*entryPageEntrySize); err != nil {
+	data := make([]byte, entryPageEntrySize)
+
+	// Marshal usedBytes and pageOff
+	binary.PutVarint(data[0:8], usedBytes)
+	binary.PutVarint(data[8:], pageOff)
+
+	// Write the data to disk
+	if _, err := pp.writeAt(data, index*entryPageEntrySize); err != nil {
 		return err
 	}
 	return nil

@@ -1,8 +1,8 @@
 package pages
 
 import (
-	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -106,23 +106,29 @@ func (p *PageManager) loadFreePagesFromDisk() error {
 	// and closed before writing any files to it other than the initial free
 	// pages
 	pageData := make([]byte, pageSize)
-	if n, err := p.file.ReadAt(pageData, freePagesOffset); err != nil && !(err == io.EOF && n > 0) {
+	if n, err := p.file.ReadAt(pageData, freePagesOffset); err != nil && !(err == io.EOF && n > 8) {
 		return err
 	}
 
-	// Create buffer from the pages data and read the number of entries
-	buffer := bytes.NewBuffer(pageData)
-	numEntries := uint64(0)
-	if err := binary.Read(buffer, binary.LittleEndian, &numEntries); err != nil {
-		return err
+	// off is an offset used for unmarshalling the pageData
+	off := 0
+
+	// Unmarshal number of entries
+	numEntries := binary.LittleEndian.Uint64(pageData[off : off+8])
+	off += 8
+
+	// Check if the remaining data is big enough to hold numEntries entries
+	if uint64(len(pageData[off:])) < 8*numEntries {
+		panic(fmt.Sprintf("Sanity check failed. %v < %v", len(pageData[off:]), 8*numEntries))
 	}
 
-	var offset int64
 	for i := uint64(0); i < numEntries; i++ {
 		// Unmarshal page offset
-		if err := binary.Read(buffer, binary.LittleEndian, &offset); err != nil {
-			return err
+		offset, bytesRead := binary.Varint(pageData[off : off+8])
+		if offset == 0 && bytesRead <= 0 {
+			return errors.New("Failed to unmarshal offset")
 		}
+		off += 8
 
 		// Create physicalPage object
 		pp := &physicalPage{
@@ -238,33 +244,31 @@ func (p *PageManager) Open(id Identifier) (*Entry, error) {
 // writeFreePagesToDisk writes the offsets of the freePages of the pageManager
 // to disk on the first page of the file
 func (p *PageManager) writeFreePagesToDisk() error {
-	buffer := bytes.NewBuffer(make([]byte, 0))
-
 	// Get the number of pages we are about to write to disk
 	numPages := uint64(len(p.freePages))
 	if numPages > maxFreePagesStored {
 		numPages = maxFreePagesStored
 	}
 
-	// Write the number of pages to the buffer
-	if err := binary.Write(buffer, binary.LittleEndian, &numPages); err != nil {
-		return err
-	}
+	// off is an offset that is used for the marshalling of the data
+	off := 0
 
-	// Write each page to the buffer
+	// Allocate memory for the marshalled data
+	dataLen := (numPages + 1) * 8
+	data := make([]byte, dataLen)
+
+	// Marshal the number of pages
+	binary.LittleEndian.PutUint64(data[off:8], numPages)
+	off += 8
+
+	// Marshal each pages offset
 	for i := uint64(0); i < numPages; i++ {
-		if err := binary.Write(buffer, binary.LittleEndian, &p.freePages[i].fileOff); err != nil {
-			return err
-		}
+		binary.PutVarint(data[off:off+8], p.freePages[i].fileOff)
+		off += 8
 	}
 
-	// Sanity check buffer length
-	if buffer.Len() > pageSize {
-		panic("Sanity check failed. Buffer length larger than filesize")
-	}
-
-	// Write buffer to disk
-	if _, err := p.file.WriteAt(buffer.Bytes(), freePagesOffset); err != nil {
+	// Write data to disk
+	if _, err := p.file.WriteAt(data, freePagesOffset); err != nil {
 		return err
 	}
 	return nil

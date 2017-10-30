@@ -1,9 +1,7 @@
 package pages
 
 import (
-	"bytes"
 	"encoding/binary"
-	"fmt"
 	"math"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -130,8 +128,6 @@ func extendPageTableTree(root *pageTable, pm *PageManager) (*pageTable, error) {
 
 // Marshal serializes a pageTable to be able to write it to disk
 func (pt pageTable) Marshal() ([]byte, error) {
-	buffer := bytes.NewBuffer(make([]byte, 0))
-
 	// Get the number of entries and the offsets of the entries
 	var numEntries uint64
 	var offsets []int64
@@ -147,27 +143,23 @@ func (pt pageTable) Marshal() ([]byte, error) {
 		}
 	}
 
+	// off is an offset used for marshalling the data
+	off := 0
+
+	// Allocate enough memory for marshalled data
+	data := make([]byte, (numEntries+1)*8)
+
 	// Write the number of entries
-	err := binary.Write(buffer, binary.LittleEndian, &numEntries)
-	if err != nil {
-		return nil, build.ExtendErr("Failed to marshal numEntries", err)
-	}
+	binary.LittleEndian.PutUint64(data[off:8], numEntries)
+	off += 8
 
 	// Write the offsets of the entries
 	for _, offset := range offsets {
-		err := binary.Write(buffer, binary.LittleEndian, &offset)
-		if err != nil {
-			return nil, build.ExtendErr("Failed to marshal entry offset", err)
-		}
+		binary.PutVarint(data[off:off+8], offset)
+		off += 8
 	}
 
-	// Sanity check the marshalled length of the pageTable
-	if buffer.Len() > pageSize {
-		panic(fmt.Sprintf("Sanity check failed. Marshalled pagetable > pageSize, %v > %v",
-			buffer.Len(), pageSize))
-	}
-
-	return buffer.Bytes(), nil
+	return data, nil
 }
 
 // writeToDisk marshals a pageTable and writes it to disk
