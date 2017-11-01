@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -60,6 +61,7 @@ func TestAllocatePage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer pt.Close()
 
 	// Allocate numPages pages
 	numPages := 10000
@@ -104,6 +106,7 @@ func TestReadWriteFreePagesToDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer pt.Close()
 
 	// Add more free pages than the first page can actually hold
 	numPages := int64(10000)
@@ -149,6 +152,7 @@ func TestRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer pt.Close()
 
 	entry, identifier, err := pt.pm.Create()
 	if err != nil {
@@ -175,8 +179,8 @@ func TestRecovery(t *testing.T) {
 	}
 
 	// Check if the entry contains the right number of pages
-	if len(entry.pages) != numPages {
-		t.Errorf("entry should contain %v pages but only had %v", numPages, len(entry.pages))
+	if len(entry.ep.pages) != numPages {
+		t.Errorf("entry should contain %v pages but only had %v", numPages, len(entry.ep.pages))
 	}
 
 	// Read the previously written data and compare it
@@ -196,4 +200,119 @@ func TestRecovery(t *testing.T) {
 	if length != int64(len(data)) {
 		t.Errorf("length should be %v but was %v", len(data), length)
 	}
+}
+
+// TestInstanceCounter tests if the entryPage instance counter works as expected
+func TestInstanceCounter(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pt.Close()
+
+	if len(pt.pm.entryPages) != 0 {
+		t.Errorf("length of entryPages should be 0 but was %v", len(pt.pm.entryPages))
+	}
+
+	// Create new entry
+	entry, identifier, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.ep.instanceCounter != 1 {
+		t.Errorf("counter should be 1 but was %v", entry.ep.instanceCounter)
+	}
+	if len(pt.pm.entryPages) != 1 {
+		t.Errorf("length of entryPages should be 1 but was %v", len(pt.pm.entryPages))
+	}
+
+	// Open the same entry again as entry2
+	entry2, err := pt.pm.Open(identifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry2.ep.instanceCounter != 2 {
+		t.Errorf("counter should be 2 but was %v", entry.ep.instanceCounter)
+	}
+	if len(pt.pm.entryPages) != 1 {
+		t.Errorf("length of entryPages should be 1 but was %v", len(pt.pm.entryPages))
+	}
+
+	// Close entry
+	if err := entry.Close(); err != nil {
+		t.Errorf("closing entry failed: %v", err)
+	}
+	if entry2.ep.instanceCounter != 1 {
+		t.Errorf("counter should be 1 but was %v", entry.ep.instanceCounter)
+	}
+	if len(pt.pm.entryPages) != 1 {
+		t.Errorf("length of entryPages should be 1 but was %v", len(pt.pm.entryPages))
+	}
+
+	// Close entry2
+	if err := entry2.Close(); err != nil {
+		t.Errorf("closing entry failed: %v", err)
+	}
+	if entry2.ep.instanceCounter != 0 {
+		t.Errorf("counter should be 0 but was %v", entry.ep.instanceCounter)
+	}
+	if len(pt.pm.entryPages) != 0 {
+		t.Errorf("length of entryPages should be 0 but was %v", pt.pm.entryPages)
+	}
+}
+
+// TestReadWriteConcurrency tests if ReadAt and WriteAt behave as expected when
+// called from multiple threads in parallel
+func TestReadWriteConcurrency(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pt.Close()
+
+	// Create new entry
+	entry, identifier, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Close()
+
+	// Let 10 threads write and read 10000 pages worth of data
+	numThreads := 10
+	data := fastrand.Bytes(10000 * pageSize)
+
+	// Define the thread's function
+	wg := new(sync.WaitGroup)
+	f := func(index int64) {
+		for i := int64(0); i < 10; i++ {
+			// Open entry
+			entry, err := pt.pm.Open(identifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer entry.Close()
+
+			offset := index * (int64(len(data) / numThreads))
+			// Write to it
+			n, err := entry.WriteAt(data, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Read the same data
+			readData := make([]byte, n)
+			if _, err := entry.ReadAt(readData, offset); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wg.Done()
+		return
+	}
+
+	for i := int64(0); i < int64(numThreads); i++ {
+		wg.Add(1)
+		go f(i)
+	}
+
+	wg.Wait()
 }

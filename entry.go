@@ -17,10 +17,6 @@ type (
 		// ep is the tiered entryPage for this entry
 		ep *entryPage
 
-		// pages is a list of the physical pages that are used to store the
-		// data of this entry
-		pages []*physicalPage
-
 		// cursorOff is the offset of the cursor from the start of the current
 		// page it is pointed at
 		cursorOff int64
@@ -31,13 +27,21 @@ type (
 )
 
 // Close is a no-op
-func (Entry) Close() error {
+func (e *Entry) Close() error {
+	e.ep.pm.mu.Lock()
+	defer e.ep.pm.mu.Unlock()
+	// If the remaining entries pointing to this entryPage is 0 we can delete
+	// it from the map
+	e.ep.instanceCounter--
+	if e.ep.instanceCounter == 0 {
+		delete(e.ep.pm.entryPages, Identifier(e.ep.pp.fileOff))
+	}
 	return nil
 }
 
 // read is a helper function that reads at a specific cursorPage and offset
 func (e *Entry) read(p []byte, cursorPage *int64, cursorOff *int64) (n int, err error) {
-	if len(e.pages) == 0 {
+	if len(e.ep.pages) == 0 {
 		return 0, io.EOF
 	}
 
@@ -50,13 +54,13 @@ func (e *Entry) read(p []byte, cursorPage *int64, cursorOff *int64) (n int, err 
 	readData := make([]byte, bytesToRead)
 	for bytesToRead > 0 {
 		// Abort if no more pages are left to read
-		if *cursorPage >= int64(len(e.pages)) {
+		if *cursorPage >= int64(len(e.ep.pages)) {
 			break
 		}
 
 		// Read the data from the page
 		var bytesRead int
-		bytesRead, err = e.pages[*cursorPage].readAt(readData, *cursorOff)
+		bytesRead, err = e.ep.pages[*cursorPage].readAt(readData, *cursorOff)
 		if err != nil {
 			return 0, err
 		}
@@ -83,11 +87,16 @@ func (e *Entry) read(p []byte, cursorPage *int64, cursorOff *int64) (n int, err 
 
 // Read tries to read len(p) bytes from the current cursor position
 func (e *Entry) Read(p []byte) (n int, err error) {
+	e.ep.mu.RLock()
+	defer e.ep.mu.RUnlock()
 	return e.read(p, &e.cursorPage, &e.cursorOff)
 }
 
 // ReadAt reads from a specific offset
 func (e *Entry) ReadAt(p []byte, off int64) (int, error) {
+	e.ep.mu.RLock()
+	defer e.ep.mu.RUnlock()
+
 	// Seek to the offset from the beginning of the file
 	cursorPage := int64(0)
 	cursorOff := int64(0)
@@ -114,8 +123,8 @@ func (e *Entry) seek(offset int64, cursorPage *int64, cursorOff *int64) error {
 	// If the page number is higher than the number of available pages set it to
 	// the number of available pages at offset 0 to signal other functions that
 	// we cannot continue reading
-	if cursorPageNew >= int64(len(e.pages)) {
-		cursorPageNew = int64(len(e.pages))
+	if cursorPageNew >= int64(len(e.ep.pages)) {
+		cursorPageNew = int64(len(e.ep.pages))
 		cursorOffNew = 0
 	}
 
@@ -127,6 +136,9 @@ func (e *Entry) seek(offset int64, cursorPage *int64, cursorOff *int64) error {
 // Seek moves the cursor for reading and writing to the appropriate page and
 // offset
 func (e *Entry) Seek(offset int64, whence int) (int64, error) {
+	e.ep.mu.RLock()
+	defer e.ep.mu.RUnlock()
+
 	// Calculate the correct page and page offset
 	var pageNum int64
 	var pageOff int64
@@ -139,7 +151,7 @@ func (e *Entry) Seek(offset int64, whence int) (int64, error) {
 		pageNum = e.cursorPage
 		pageOff = e.cursorOff
 	case io.SeekEnd:
-		pageNum = int64(len(e.pages))
+		pageNum = int64(len(e.ep.pages))
 		pageOff = 0
 	}
 
@@ -161,6 +173,9 @@ func (e *Entry) Sync() error {
 
 // Truncate shortens an entry to size bytes
 func (e *Entry) Truncate(size int64) error {
+	e.ep.mu.Lock()
+	defer e.ep.mu.Unlock()
+
 	// Recursively truncate the tree
 	if _, err := e.recursiveTruncate(e.ep.root, size); err != nil {
 		return err
@@ -226,8 +241,8 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 			}
 			// Remove the page from the entry's pages and the pageTable
 			delete(pt.childPages, i)
-			removed := e.pages[len(e.pages)-1]
-			e.pages = e.pages[:len(e.pages)-1]
+			removed := e.ep.pages[len(e.ep.pages)-1]
+			e.ep.pages = e.ep.pages[:len(e.ep.pages)-1]
 
 			// Sanity check. Removed pages should be the same
 			if removed.fileOff != page.fileOff {
@@ -263,8 +278,23 @@ func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error
 
 	// Write until all the bytes are written. If necessary allocate new pages
 	writeCursor := 0
+	appending := false
 	for bytesToWrite > 0 {
-		if *cursorPage >= int64(len(e.pages)) {
+		// Check if we are going to add a new page or extend the last page
+		if *cursorPage >= int64(len(e.ep.pages)) ||
+			(*cursorPage == int64(len(e.ep.pages)-1) &&
+				*cursorOff+bytesToWrite > e.ep.pages[*cursorPage].usedSize) {
+			if !appending {
+				// Seems like we are appending now. Change to write lock.
+				appending = true
+				e.ep.mu.RUnlock()
+				e.ep.mu.Lock()
+				defer e.ep.mu.RLock()
+				defer e.ep.mu.Unlock()
+			}
+		}
+
+		if *cursorPage >= int64(len(e.ep.pages)) {
 			// Allocate new page if necessary
 			newPage, err := e.pm.managedAllocatePage()
 			if err != nil {
@@ -272,13 +302,13 @@ func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error
 			}
 			// Add it to the list of pages and addedPages
 			addedPages = append(addedPages, newPage)
-			e.pages = append(e.pages, newPage)
+			e.ep.pages = append(e.ep.pages, newPage)
 			continue
 		}
 
 		// Write parts of the data to the page and remember the size increase
 		// of the page
-		page := e.pages[*cursorPage]
+		page := e.ep.pages[*cursorPage]
 		usedPageSize := page.usedSize
 		bytesWritten, err := page.writeAt(p[writeCursor:], *cursorOff)
 		byteIncrease += (page.usedSize - usedPageSize)
@@ -306,11 +336,16 @@ func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error
 
 // Write tries to write len(p) byte to the current cursor position
 func (e *Entry) Write(p []byte) (int, error) {
+	e.ep.mu.RLock()
+	defer e.ep.mu.RUnlock()
 	return e.write(p, &e.cursorPage, &e.cursorOff)
 }
 
 // WriteAt writes to a specific offset
 func (e *Entry) WriteAt(p []byte, off int64) (n int, err error) {
+	e.ep.mu.RLock()
+	defer e.ep.mu.RUnlock()
+
 	// Seek to the offset from the beginning of the file
 	cursorPage := int64(0)
 	cursorOff := int64(0)

@@ -22,8 +22,8 @@ func TestEntrySeek(t *testing.T) {
 	}
 
 	// Entry should have no pages
-	if len(entry.pages) != 0 {
-		t.Errorf("Entry should have 0 pages but has %v", len(entry.pages))
+	if len(entry.ep.pages) != 0 {
+		t.Errorf("Entry should have 0 pages but has %v", len(entry.ep.pages))
 	}
 
 	// Seeking before the file start shouldn't work
@@ -40,7 +40,7 @@ func TestEntrySeek(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to allocate new page: %v", err)
 	}
-	entry.pages = append(entry.pages, pp)
+	entry.ep.pages = append(entry.ep.pages, pp)
 
 	// Seek to the start of the page
 	pos, err = entry.Seek(0, io.SeekStart)
@@ -77,7 +77,7 @@ func TestEntrySeek(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to allocate new page: %v", err)
 	}
-	entry.pages = append(entry.pages, pp1, pp2)
+	entry.ep.pages = append(entry.ep.pages, pp1, pp2)
 
 	// Seek to the end of the 3 pages
 	pos, err = entry.Seek(0, io.SeekEnd)
@@ -142,7 +142,7 @@ func TestEntryRead(t *testing.T) {
 		if err != nil {
 			t.Errorf("Failed to allocate new page: %v", err)
 		}
-		entry.pages = append(entry.pages, pp)
+		entry.ep.pages = append(entry.ep.pages, pp)
 
 		// Write data to them and remember the data
 		pageData := fastrand.Bytes(pageSize)
@@ -208,8 +208,8 @@ func TestEntryWrite(t *testing.T) {
 	}
 
 	// The entry is supposed to have 0 pages
-	if len(entry.pages) != 0 {
-		t.Errorf("Entry is supposed to have 0 pages initially but had %v", len(entry.pages))
+	if len(entry.ep.pages) != 0 {
+		t.Errorf("Entry is supposed to have 0 pages initially but had %v", len(entry.ep.pages))
 	}
 
 	// Write a few times the number of pageSize to the entry
@@ -221,8 +221,8 @@ func TestEntryWrite(t *testing.T) {
 	}
 
 	// Check the number of pages in the Entry
-	if len(entry.pages) != pages {
-		t.Errorf("Entry was supposed to have %v pages but had %v", pages, len(entry.pages))
+	if len(entry.ep.pages) != pages {
+		t.Errorf("Entry was supposed to have %v pages but had %v", pages, len(entry.ep.pages))
 	}
 
 	// Read the data to check if it was written correctly
@@ -296,8 +296,8 @@ func TestTruncate(t *testing.T) {
 
 	// Check if the number of remaining pages in the entry is ok
 	expectedPages := truncatedSize/pageSize + 1
-	if int64(len(entry.pages)) != expectedPages {
-		t.Errorf("len(entry.pages) should be %v but was %v", expectedPages, len(entry.pages))
+	if int64(len(entry.ep.pages)) != expectedPages {
+		t.Errorf("len(entry.pages) should be %v but was %v", expectedPages, len(entry.ep.pages))
 	}
 
 	// The remaining pages should be in the freePages slice
