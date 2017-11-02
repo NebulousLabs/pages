@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -83,12 +82,6 @@ func TestAllocatePage(t *testing.T) {
 	// Check filesize afterwards
 	if stats.Size() != int64(numPages*pageSize+dataOff) {
 		t.Errorf("Filesize should be %v, but was %v", numPages*pageSize+dataOff, stats.Size())
-	}
-
-	// Check if pages were allocated
-	if pt.pm.allocatedPages != int64(numPages) {
-		t.Errorf("AllocatedPages has wrong value. Should be %v, but was %v",
-			numPages, pt.pm.allocatedPages)
 	}
 
 	// Check if fields were set correctly
@@ -259,60 +252,4 @@ func TestInstanceCounter(t *testing.T) {
 	if len(pt.pm.entryPages) != 0 {
 		t.Errorf("length of entryPages should be 0 but was %v", pt.pm.entryPages)
 	}
-}
-
-// TestReadWriteConcurrency tests if ReadAt and WriteAt behave as expected when
-// called from multiple threads in parallel
-func TestReadWriteConcurrency(t *testing.T) {
-	pt, err := newPagingTester(t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pt.Close()
-
-	// Create new entry
-	entry, identifier, err := pt.pm.Create()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer entry.Close()
-
-	// Let 10 threads write and read 10000 pages worth of data
-	numThreads := 10
-	data := fastrand.Bytes(10000 * pageSize)
-
-	// Define the thread's function
-	wg := new(sync.WaitGroup)
-	f := func(index int64) {
-		for i := int64(0); i < 10; i++ {
-			// Open entry
-			entry, err := pt.pm.Open(identifier)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer entry.Close()
-
-			offset := index * (int64(len(data) / numThreads))
-			// Write to it
-			n, err := entry.WriteAt(data, offset)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			// Read the same data
-			readData := make([]byte, n)
-			if _, err := entry.ReadAt(readData, offset); err != nil {
-				t.Fatal(err)
-			}
-		}
-		wg.Done()
-		return
-	}
-
-	for i := int64(0); i < int64(numThreads); i++ {
-		wg.Add(1)
-		go f(i)
-	}
-
-	wg.Wait()
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sync"
 
@@ -39,15 +40,19 @@ type (
 )
 
 // AddPages adds multiple physical pages to the tree and increments the
-// usedSize of the entryPage
+// usedSize of the entryPage. The ep.mu write lock needs to be acquired if
+// len(pages) > 0 otherwise the read lock will suffice
 func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
-	// if there were no pages added just increment the usd size and return
-	if len(pages) == 0 {
-		ep.usedSize += addedBytes
+	if addedBytes == 0 {
+		return nil
 	}
-	// Add the pages to the entryPage
+
+	log.Printf("addpages start")
+	defer log.Printf("addpages end")
+	// Otherwise add the pages to the entryPage
 	index := uint64(ep.usedSize / pageSize)
 	for _, page := range pages {
+		log.Printf("index %v", index)
 		newRoot, err := ep.root.insertPage(index, page, ep.pm)
 		index++
 

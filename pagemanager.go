@@ -27,9 +27,6 @@ type PageManager struct {
 	// mu is a mutex to lock the PageManager's ressources
 	mu *sync.Mutex
 
-	// allocatedPages keeps track of the number of allocated pages
-	allocatedPages int64
-
 	// entryPages keeps track of all the entryPages
 	entryPages map[Identifier]*entryPage
 }
@@ -69,9 +66,6 @@ func (p *PageManager) allocatePage() (*physicalPage, error) {
 	if n != pageSize || err != nil {
 		return nil, fmt.Errorf("couldn't write new page wrote %v bytes %v", n, err)
 	}
-
-	// Increment the number of allocated pages
-	p.allocatedPages++
 
 	return newPage, nil
 }

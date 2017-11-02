@@ -3,6 +3,7 @@ package pages
 import (
 	"bytes"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/NebulousLabs/fastrand"
@@ -323,4 +324,115 @@ func TestTruncate(t *testing.T) {
 	if _, err := entry.Read(readData); err != io.EOF {
 		t.Errorf("Read didn't fail with EOF: %v", err)
 	}
+}
+
+// TestReadWriteConcurrency tests if ReadAt and WriteAt behave as expected when
+// called from multiple threads in parallel
+func TestReadWriteConcurrency(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pt.Close()
+
+	// Create new entry
+	entry, identifier, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Close()
+
+	// Let 10 threads write and read 10000 pages worth of data
+	numThreads := 10
+	data := fastrand.Bytes(10000 * pageSize)
+
+	// Define the thread's function
+	wg := new(sync.WaitGroup)
+	f := func(index int64) {
+		for i := int64(0); i < 10; i++ {
+			// Open entry
+			entry, err := pt.pm.Open(identifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer entry.Close()
+
+			offset := index * (int64(len(data) / numThreads))
+			// Write to it
+			n, err := entry.WriteAt(data, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Read the same data
+			readData := make([]byte, n)
+			if _, err := entry.ReadAt(readData, offset); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wg.Done()
+		return
+	}
+
+	for i := int64(0); i < int64(numThreads); i++ {
+		wg.Add(1)
+		go f(i)
+	}
+
+	wg.Wait()
+}
+
+// TestWriteTruncateConcurrency tests if WriteAt and Truncate behave as
+// expected when called from multiple threads in parallel
+func TestWriteTruncateConcurrency(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pt.Close()
+
+	// Create new entry
+	entry, identifier, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Close()
+
+	// Let 20 threads write and read 10000 pages worth of data
+	numThreads := 20
+	data := fastrand.Bytes(10000 * pageSize)
+
+	// Define the thread's function
+	wg := new(sync.WaitGroup)
+	f := func(index int64) {
+		for i := int64(0); i < 10; i++ {
+			// Open entry
+			entry, err := pt.pm.Open(identifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer entry.Close()
+
+			offset := index * (int64(len(data) / numThreads))
+			// Write to it
+			_, err = entry.WriteAt(data, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Truncate the data to half the data size
+			if err := entry.Truncate(int64(len(data) / 2)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wg.Done()
+		return
+	}
+
+	for i := int64(0); i < int64(numThreads); i++ {
+		wg.Add(1)
+		go f(i)
+	}
+
+	wg.Wait()
 }

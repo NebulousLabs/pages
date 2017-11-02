@@ -3,6 +3,7 @@ package pages
 import (
 	"errors"
 	"io"
+	"log"
 
 	"github.com/NebulousLabs/Sia/build"
 )
@@ -176,6 +177,8 @@ func (e *Entry) Truncate(size int64) error {
 	e.ep.mu.Lock()
 	defer e.ep.mu.Unlock()
 
+	log.Printf("truncate start %v, used %v", size, e.ep.usedSize)
+	defer log.Printf("truncate end")
 	// Recursively truncate the tree
 	if _, err := e.recursiveTruncate(e.ep.root, size); err != nil {
 		return err
@@ -185,6 +188,7 @@ func (e *Entry) Truncate(size int64) error {
 	if err := e.pm.writeFreePagesToDisk(); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -208,8 +212,9 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 			// If the child is empty now we can remove it from the tree and
 			// free its page
 			if empty {
-				// Delete the child
+				// Delete and clear the child
 				child := pt.childTables[i]
+				child.pp.usedSize = 0
 				delete(pt.childTables, i)
 
 				// Add its page to the free ones
@@ -219,6 +224,12 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 				if err := pt.writeToDisk(); err != nil {
 					return false, err
 				}
+
+				// If the parent is now empty too return
+				if len(pt.childTables) == 0 {
+					return true, nil
+				}
+
 			}
 		}
 	}
@@ -249,11 +260,12 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 				panic("sanity check failed. removed pages weren't the same")
 			}
 
-			// Add the page to the pageManager's freePages
+			// add the page to the pageManager's freePages
 			e.pm.freePages = append(e.pm.freePages, page)
 
-			// Reduce the entryPage's usedSize
+			// Reduce the entryPage's usedSize and clear the removed page
 			e.ep.usedSize -= page.usedSize
+			page.usedSize = 0
 
 			// If the childTables are empty we can return right away
 			if len(pt.childPages) == 0 {
@@ -276,6 +288,12 @@ func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error
 	byteIncrease := int64(0)
 	addedPages := make([]*physicalPage, 0)
 
+	// backup cursorPage and cursorOff in case we need to reset the loop
+	bCursorPage := cursorPage
+	bCursorOff := cursorOff
+
+	log.Printf("write start")
+	defer log.Printf("write end")
 	// Write until all the bytes are written. If necessary allocate new pages
 	writeCursor := 0
 	appending := false
@@ -285,12 +303,23 @@ func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error
 			(*cursorPage == int64(len(e.ep.pages)-1) &&
 				*cursorOff+bytesToWrite > e.ep.pages[*cursorPage].usedSize) {
 			if !appending {
-				// Seems like we are appending now. Change to write lock.
+				// Seems like we are appending now. Change to write lock and
+				// restart loop.
 				appending = true
+				log.Printf("release read lock")
 				e.ep.mu.RUnlock()
 				e.ep.mu.Lock()
+				log.Printf("got write lock")
 				defer e.ep.mu.RLock()
 				defer e.ep.mu.Unlock()
+
+				// Reset loop
+				cursorPage = bCursorPage
+				cursorOff = bCursorOff
+				bytesToWrite = int64(len(p))
+				writeCursor = 0
+				byteIncrease = int64(0)
+				addedPages = make([]*physicalPage, 0)
 			}
 		}
 
