@@ -2,8 +2,8 @@ package pages
 
 import (
 	"errors"
+	"fmt"
 	"io"
-	"log"
 
 	"github.com/NebulousLabs/Sia/build"
 )
@@ -177,8 +177,6 @@ func (e *Entry) Truncate(size int64) error {
 	e.ep.mu.Lock()
 	defer e.ep.mu.Unlock()
 
-	log.Printf("truncate start %v, used %v", size, e.ep.usedSize)
-	defer log.Printf("truncate end")
 	// Recursively truncate the tree
 	if _, err := e.recursiveTruncate(e.ep.root, size); err != nil {
 		return err
@@ -229,7 +227,6 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 				if len(pt.childTables) == 0 {
 					return true, nil
 				}
-
 			}
 		}
 	}
@@ -257,7 +254,8 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 
 			// Sanity check. Removed pages should be the same
 			if removed.fileOff != page.fileOff {
-				panic("sanity check failed. removed pages weren't the same")
+				panic(fmt.Sprintf("removed pages weren't the same %v != %v",
+					removed.fileOff, page.fileOff))
 			}
 
 			// add the page to the pageManager's freePages
@@ -289,38 +287,34 @@ func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error
 	addedPages := make([]*physicalPage, 0)
 
 	// backup cursorPage and cursorOff in case we need to reset the loop
-	bCursorPage := cursorPage
-	bCursorOff := cursorOff
+	bCursorPage := *cursorPage
+	bCursorOff := *cursorOff
 
-	log.Printf("write start")
-	defer log.Printf("write end")
 	// Write until all the bytes are written. If necessary allocate new pages
 	writeCursor := 0
 	appending := false
 	for bytesToWrite > 0 {
 		// Check if we are going to add a new page or extend the last page
-		if *cursorPage >= int64(len(e.ep.pages)) ||
-			(*cursorPage == int64(len(e.ep.pages)-1) &&
-				*cursorOff+bytesToWrite > e.ep.pages[*cursorPage].usedSize) {
-			if !appending {
-				// Seems like we are appending now. Change to write lock and
-				// restart loop.
-				appending = true
-				log.Printf("release read lock")
-				e.ep.mu.RUnlock()
-				e.ep.mu.Lock()
-				log.Printf("got write lock")
-				defer e.ep.mu.RLock()
-				defer e.ep.mu.Unlock()
+		if !appending &&
+			(*cursorPage >= int64(len(e.ep.pages)) ||
+				(*cursorPage == int64(len(e.ep.pages)-1) &&
+					*cursorOff+bytesToWrite > e.ep.pages[*cursorPage].usedSize)) {
+			// Seems like we are appending now. Change to write lock and
+			// restart loop.
+			appending = true
+			e.ep.mu.RUnlock()
+			e.ep.mu.Lock()
+			defer e.ep.mu.RLock()
+			defer e.ep.mu.Unlock()
 
-				// Reset loop
-				cursorPage = bCursorPage
-				cursorOff = bCursorOff
-				bytesToWrite = int64(len(p))
-				writeCursor = 0
-				byteIncrease = int64(0)
-				addedPages = make([]*physicalPage, 0)
-			}
+			// Reset loop
+			*cursorPage = bCursorPage
+			*cursorOff = bCursorOff
+			bytesToWrite = int64(len(p))
+			writeCursor = 0
+			byteIncrease = int64(0)
+			addedPages = make([]*physicalPage, 0)
+			continue
 		}
 
 		if *cursorPage >= int64(len(e.ep.pages)) {
@@ -332,6 +326,12 @@ func (e *Entry) write(p []byte, cursorPage *int64, cursorOff *int64) (int, error
 			// Add it to the list of pages and addedPages
 			addedPages = append(addedPages, newPage)
 			e.ep.pages = append(e.ep.pages, newPage)
+
+			// If we still don't have enough pages mark this page as full
+			if *cursorPage >= int64(len(e.ep.pages)) {
+				newPage.usedSize = pageSize
+				byteIncrease += pageSize
+			}
 			continue
 		}
 

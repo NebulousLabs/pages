@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"sync"
 
@@ -47,12 +46,9 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 		return nil
 	}
 
-	log.Printf("addpages start")
-	defer log.Printf("addpages end")
 	// Otherwise add the pages to the entryPage
 	index := uint64(ep.usedSize / pageSize)
 	for _, page := range pages {
-		log.Printf("index %v", index)
 		newRoot, err := ep.root.insertPage(index, page, ep.pm)
 		index++
 

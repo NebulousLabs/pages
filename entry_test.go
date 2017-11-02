@@ -399,7 +399,7 @@ func TestWriteTruncateConcurrency(t *testing.T) {
 	defer entry.Close()
 
 	// Let 20 threads write and read 10000 pages worth of data
-	numThreads := 20
+	numThreads := 10
 	data := fastrand.Bytes(10000 * pageSize)
 
 	// Define the thread's function
@@ -415,13 +415,19 @@ func TestWriteTruncateConcurrency(t *testing.T) {
 
 			offset := index * (int64(len(data) / numThreads))
 			// Write to it
-			_, err = entry.WriteAt(data, offset)
+			_, err = entry.WriteAt(data[offset:int(offset)+len(data)/numThreads], offset)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// Truncate the data to half the data size
 			if err := entry.Truncate(int64(len(data) / 2)); err != nil {
+				t.Fatal(err)
+			}
+
+			// Write to it again
+			_, err = entry.WriteAt(data[offset:int(offset)+len(data)/numThreads], offset)
+			if err != nil {
 				t.Fatal(err)
 			}
 		}
