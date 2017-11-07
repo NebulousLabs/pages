@@ -49,25 +49,18 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 	// Otherwise add the pages to the entryPage
 	index := uint64(ep.usedSize / pageSize)
 	for _, page := range pages {
-		newRoot, err := ep.root.insertPage(index, page, ep.pm)
-		index++
-
-		if err != nil {
+		root := ep.root
+		if err := ep.insertPage(index, page); err != nil {
 			build.ExtendErr("failed to insert page", err)
 		}
 
 		// Check if root changed. If it did write down the entry for the last
 		// root with it's max value for usedBytes before changing ep.root.
-		if newRoot != ep.root {
-			// numPages is the max number of pages the current root can contain
-			numPages := int64(math.Pow(float64(numPageEntries), float64(ep.root.height+1)))
-
-			// usedBytes is the max size of data the current root can contain
-			usedBytes := numPages * pageSize
-
-			writeEntryPageEntry(ep.pp, ep.root.height, usedBytes, ep.root.pp.fileOff)
-			ep.root = newRoot
+		if root != ep.root {
+			bytesUsed := int64(maxPages(root.height) * pageSize)
+			writeEntryPageEntry(ep.pp, root.height, bytesUsed, root.pp.fileOff)
 		}
+		index++
 	}
 
 	// Increment the usedSize
@@ -76,6 +69,71 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 	// Write the root
 	writeEntryPageEntry(ep.pp, ep.root.height, ep.usedSize, ep.root.pp.fileOff)
 
+	return nil
+}
+
+// maxPages return the number of pages the tree can contain
+func (ep *entryPage) maxPages() uint64 {
+	return maxPages(ep.root.height)
+}
+
+// cap returns the number of pages a tree with a certain height can contain.
+// The height starts at 0. This means a simple tree with 1 root node and
+// numPageEntries leaves would have height 1
+func maxPages(height int64) uint64 {
+	return uint64(math.Pow(numPageEntries, float64(height+1)))
+}
+
+// insertePage is a helper function that inserts a page into the pageTable
+// tree. It returns an error to indicate if the root changed.
+func (ep *entryPage) insertPage(index uint64, pp *physicalPage) error {
+	// Calculate the maximum number of pages the tree can contain at the moment
+	// If the index is too large we need to extend the tree before we can
+	// insert the page
+	for maxPages := ep.maxPages(); index >= maxPages; maxPages = ep.maxPages() {
+		newRoot, err := extendPageTableTree(ep.root, ep.pm)
+		if err != nil {
+			return build.ExtendErr("Failed to extend the pageTable tree", err)
+		}
+		ep.root = newRoot
+	}
+
+	// Search the tree for the correct pageTable to insert the page
+	pt := ep.root
+	var tableIndex uint64
+	var pageIndex = index
+	for pt.height > 0 {
+		tableIndex = pageIndex / maxPages(pt.height-1)
+		pageIndex /= numPageEntries
+
+		// Check if the pageTable exists. If it doesn't, we have to create it
+		_, exists := pt.childTables[tableIndex]
+		if !exists {
+			newPt, err := newPageTable(pt.height-1, pt, ep.pm)
+			if err != nil {
+				return build.ExtendErr("failed to create a new pageTable", err)
+			}
+			pt.childTables[tableIndex] = newPt
+			if err := pt.writeToDisk(); err != nil {
+				return build.ExtendErr("failed to write pageTable to disk", err)
+			}
+		}
+		pt = pt.childTables[tableIndex]
+	}
+
+	// Sanity check the child pages
+	if len(pt.childPages) == numPageEntries {
+		panic(fmt.Sprintf("We shouldn't insert if childPages is already full: index %v", index))
+	}
+	if len(pt.childPages) > 0 && pt.childPages[index%numPageEntries-1] == nil {
+		panic("Inserting shouldn't create a gap")
+	}
+
+	// Insert page
+	pt.childPages[index%numPageEntries] = pp
+	if err := pt.writeToDisk(); err != nil {
+		return err
+	}
 	return nil
 }
 

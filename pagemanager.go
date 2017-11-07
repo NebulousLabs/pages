@@ -88,7 +88,7 @@ func (p *PageManager) Create() (*Entry, Identifier, error) {
 	}
 
 	// Create the first pageTable
-	root, err := newPageTable(p)
+	root, err := newPageTable(0, nil, p)
 	if err != nil {
 		return nil, 0, build.ExtendErr("Couldn't create new pageTable", err)
 	}

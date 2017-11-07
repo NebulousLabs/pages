@@ -2,8 +2,6 @@ package pages
 
 import (
 	"encoding/binary"
-	"fmt"
-	"math"
 
 	"github.com/NebulousLabs/Sia/build"
 )
@@ -31,67 +29,8 @@ type (
 	}
 )
 
-// insertePage is a helper function that inserts a page into the pageTable
-// tree. It returns the current root of the tree since it might change. This
-// function is primarily intended to be used within addPage
-func (pt *pageTable) insertPage(index uint64, pp *physicalPage, pm *PageManager) (*pageTable, error) {
-	// Check if we need to extend the tree
-	maxPages := uint64(math.Pow(numPageEntries, float64(pt.height+1)))
-	if index >= maxPages {
-		newRoot, err := extendPageTableTree(pt, pm)
-		if err != nil {
-			return nil, build.ExtendErr("Failed to extend the pageTable tree", err)
-		}
-		return newRoot.insertPage(index, pp, pm)
-	}
-
-	// If height equals 0 the current pt is a leaf and we can add the page directly
-	if pt.height == 0 {
-		if len(pt.childPages) == numPageEntries {
-			panic(fmt.Sprintf("We shouldn't insert if childPages is already full: index %v", index))
-		}
-		// Add the page and update the table on disk
-		pt.childPages[index] = pp
-		if err := pt.writeToDisk(); err != nil {
-			return nil, err
-		}
-
-		// Find the new root
-		root := pt
-		for root.parent != nil {
-			root = root.parent
-		}
-		return root, nil
-	}
-
-	// Figure out which pageTable the page belongs to and call AddPage again
-	// with the adjusted index
-	tableIndex := index/uint64(math.Pow(float64(numPageEntries), float64(pt.height-1))) - 1
-	pageIndex := index/numPageEntries - 1
-
-	// Check if the pageTable at tableIndex exists. If not, create it.
-	if _, exists := pt.childTables[tableIndex]; !exists {
-		newPt, err := newPageTable(pm)
-		if err != nil {
-			return nil, build.ExtendErr("Failed to create a new pageTable", err)
-		}
-		// Adjust the parent and the height. We don't need to write the changes
-		// to disk right away. That will happen in the next recursive call to
-		// insertPage
-		newPt.parent = pt
-		newPt.height = pt.height - 1
-
-		// Update the child tables and save them to disk
-		pt.childTables[tableIndex] = newPt
-		if err := pt.writeToDisk(); err != nil {
-			return nil, err
-		}
-	}
-	return pt.childTables[tableIndex].insertPage(pageIndex, pp, pm)
-}
-
 // newPageTable is a helper function to create a pageTable
-func newPageTable(pm *PageManager) (*pageTable, error) {
+func newPageTable(height int64, parent *pageTable, pm *PageManager) (*pageTable, error) {
 	// Allocate a page for the table
 	pp, err := pm.allocatePage()
 	if err != nil {
@@ -100,6 +39,8 @@ func newPageTable(pm *PageManager) (*pageTable, error) {
 
 	// Create and return the table
 	pt := pageTable{
+		parent:      parent,
+		height:      height,
 		pp:          pp,
 		childPages:  make(map[uint64]*physicalPage),
 		childTables: make(map[uint64]*pageTable),
@@ -117,14 +58,13 @@ func extendPageTableTree(root *pageTable, pm *PageManager) (*pageTable, error) {
 	}
 
 	// Create a new root pageTable
-	newRoot, err := newPageTable(pm)
+	newRoot, err := newPageTable(root.height+1, nil, pm)
 	if err != nil {
 		return nil, build.ExtendErr("Failed to create new pageTable to extend the tree", err)
 	}
 
 	// Set the previous root pageTable to be the child of the new one
 	newRoot.childTables[0] = root
-	newRoot.height = root.height + 1
 	root.parent = newRoot
 
 	return newRoot, nil
