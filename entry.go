@@ -238,6 +238,7 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 				return false, nil
 			}
 			page := pt.childPages[i]
+
 			// Check if we need to remove the whole page or if we can just
 			// truncate it
 			remainingTruncation := e.ep.usedSize - size
@@ -246,6 +247,7 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 				e.ep.usedSize -= remainingTruncation
 				continue
 			}
+
 			// Remove the page from the entry's pages and the pageTable
 			delete(pt.childPages, i)
 			removed := e.ep.pages[len(e.ep.pages)-1]
