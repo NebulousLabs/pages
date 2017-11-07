@@ -212,7 +212,6 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 			if empty {
 				// Delete and clear the child
 				child := pt.childTables[i]
-				child.pp.usedSize = 0
 				delete(pt.childTables, i)
 
 				// Add its page to the free ones
@@ -261,9 +260,8 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 			// add the page to the pageManager's freePages
 			e.pm.freePages = append(e.pm.freePages, page)
 
-			// Reduce the entryPage's usedSize and clear the removed page
+			// Clear the removed page
 			e.ep.usedSize -= page.usedSize
-			page.usedSize = 0
 
 			// If the childTables are empty we can return right away
 			if len(pt.childPages) == 0 {

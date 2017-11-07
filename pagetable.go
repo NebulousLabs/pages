@@ -66,8 +66,8 @@ func (pt *pageTable) insertPage(index uint64, pp *physicalPage, pm *PageManager)
 
 	// Figure out which pageTable the page belongs to and call AddPage again
 	// with the adjusted index
-	tableIndex := index / numPageEntries
-	pageIndex := index % numPageEntries
+	tableIndex := index/uint64(math.Pow(float64(numPageEntries), float64(pt.height-1))) - 1
+	pageIndex := index/numPageEntries - 1
 
 	// Check if the pageTable at tableIndex exists. If not, create it.
 	if _, exists := pt.childTables[tableIndex]; !exists {

@@ -39,6 +39,7 @@ func (p *PageManager) allocatePage() (*physicalPage, error) {
 	if len(p.freePages) > 0 {
 		newPage = p.freePages[0]
 		p.freePages = p.freePages[1:]
+		newPage.usedSize = 0
 		return newPage, nil
 	}
 
