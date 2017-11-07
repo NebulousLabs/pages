@@ -3,6 +3,7 @@ package pages
 import (
 	"bytes"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/NebulousLabs/fastrand"
@@ -22,8 +23,8 @@ func TestEntrySeek(t *testing.T) {
 	}
 
 	// Entry should have no pages
-	if len(entry.pages) != 0 {
-		t.Errorf("Entry should have 0 pages but has %v", len(entry.pages))
+	if len(entry.ep.pages) != 0 {
+		t.Errorf("Entry should have 0 pages but has %v", len(entry.ep.pages))
 	}
 
 	// Seeking before the file start shouldn't work
@@ -40,7 +41,7 @@ func TestEntrySeek(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to allocate new page: %v", err)
 	}
-	entry.pages = append(entry.pages, pp)
+	entry.ep.pages = append(entry.ep.pages, pp)
 
 	// Seek to the start of the page
 	pos, err = entry.Seek(0, io.SeekStart)
@@ -77,7 +78,7 @@ func TestEntrySeek(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to allocate new page: %v", err)
 	}
-	entry.pages = append(entry.pages, pp1, pp2)
+	entry.ep.pages = append(entry.ep.pages, pp1, pp2)
 
 	// Seek to the end of the 3 pages
 	pos, err = entry.Seek(0, io.SeekEnd)
@@ -142,7 +143,7 @@ func TestEntryRead(t *testing.T) {
 		if err != nil {
 			t.Errorf("Failed to allocate new page: %v", err)
 		}
-		entry.pages = append(entry.pages, pp)
+		entry.ep.pages = append(entry.ep.pages, pp)
 
 		// Write data to them and remember the data
 		pageData := fastrand.Bytes(pageSize)
@@ -208,8 +209,8 @@ func TestEntryWrite(t *testing.T) {
 	}
 
 	// The entry is supposed to have 0 pages
-	if len(entry.pages) != 0 {
-		t.Errorf("Entry is supposed to have 0 pages initially but had %v", len(entry.pages))
+	if len(entry.ep.pages) != 0 {
+		t.Errorf("Entry is supposed to have 0 pages initially but had %v", len(entry.ep.pages))
 	}
 
 	// Write a few times the number of pageSize to the entry
@@ -221,8 +222,8 @@ func TestEntryWrite(t *testing.T) {
 	}
 
 	// Check the number of pages in the Entry
-	if len(entry.pages) != pages {
-		t.Errorf("Entry was supposed to have %v pages but had %v", pages, len(entry.pages))
+	if len(entry.ep.pages) != pages {
+		t.Errorf("Entry was supposed to have %v pages but had %v", pages, len(entry.ep.pages))
 	}
 
 	// Read the data to check if it was written correctly
@@ -296,8 +297,8 @@ func TestTruncate(t *testing.T) {
 
 	// Check if the number of remaining pages in the entry is ok
 	expectedPages := truncatedSize/pageSize + 1
-	if int64(len(entry.pages)) != expectedPages {
-		t.Errorf("len(entry.pages) should be %v but was %v", expectedPages, len(entry.pages))
+	if int64(len(entry.ep.pages)) != expectedPages {
+		t.Errorf("len(entry.pages) should be %v but was %v", expectedPages, len(entry.ep.pages))
 	}
 
 	// The remaining pages should be in the freePages slice
@@ -323,4 +324,121 @@ func TestTruncate(t *testing.T) {
 	if _, err := entry.Read(readData); err != io.EOF {
 		t.Errorf("Read didn't fail with EOF: %v", err)
 	}
+}
+
+// TestReadWriteConcurrency tests if ReadAt and WriteAt behave as expected when
+// called from multiple threads in parallel
+func TestReadWriteConcurrency(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pt.Close()
+
+	// Create new entry
+	entry, identifier, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Close()
+
+	// Let 10 threads write and read 10000 pages worth of data
+	numThreads := 10
+	data := fastrand.Bytes(10000 * pageSize)
+
+	// Define the thread's function
+	wg := new(sync.WaitGroup)
+	f := func(index int64) {
+		for i := int64(0); i < 10; i++ {
+			// Open entry
+			entry, err := pt.pm.Open(identifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer entry.Close()
+
+			offset := index * (int64(len(data) / numThreads))
+			// Write to it
+			n, err := entry.WriteAt(data, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Read the same data
+			readData := make([]byte, n)
+			if _, err := entry.ReadAt(readData, offset); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wg.Done()
+		return
+	}
+
+	for i := int64(0); i < int64(numThreads); i++ {
+		wg.Add(1)
+		go f(i)
+	}
+
+	wg.Wait()
+}
+
+// TestWriteTruncateConcurrency tests if WriteAt and Truncate behave as
+// expected when called from multiple threads in parallel
+func TestWriteTruncateConcurrency(t *testing.T) {
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pt.Close()
+
+	// Create new entry
+	entry, identifier, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Close()
+
+	// Let 20 threads write and read 10000 pages worth of data
+	numThreads := 10
+	data := fastrand.Bytes(10000 * pageSize)
+
+	// Define the thread's function
+	wg := new(sync.WaitGroup)
+	f := func(index int64) {
+		for i := int64(0); i < 10; i++ {
+			// Open entry
+			entry, err := pt.pm.Open(identifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer entry.Close()
+
+			offset := index * (int64(len(data) / numThreads))
+			// Write to it
+			_, err = entry.WriteAt(data[offset:int(offset)+len(data)/numThreads], offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Truncate the data to half the data size
+			if err := entry.Truncate(int64(len(data) / 2)); err != nil {
+				t.Fatal(err)
+			}
+
+			// Write to it again
+			_, err = entry.WriteAt(data[offset:int(offset)+len(data)/numThreads], offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		wg.Done()
+		return
+	}
+
+	for i := int64(0); i < int64(numThreads); i++ {
+		wg.Add(1)
+		go f(i)
+	}
+
+	wg.Wait()
 }

@@ -27,8 +27,8 @@ type PageManager struct {
 	// mu is a mutex to lock the PageManager's ressources
 	mu *sync.Mutex
 
-	// allocatedPages keeps track of the number of allocated pages
-	allocatedPages int64
+	// entryPages keeps track of all the entryPages
+	entryPages map[Identifier]*entryPage
 }
 
 // allocatePage either returns a free page or allocates a page and adds
@@ -67,9 +67,6 @@ func (p *PageManager) allocatePage() (*physicalPage, error) {
 		return nil, fmt.Errorf("couldn't write new page wrote %v bytes %v", n, err)
 	}
 
-	// Increment the number of allocated pages
-	p.allocatedPages++
-
 	return newPage, nil
 }
 
@@ -83,10 +80,29 @@ func (p *PageManager) Create() (*Entry, Identifier, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Create entryPage
-	ep, err := newEntryPage(p)
+	// Allocate a page for the table
+	pp, err := p.allocatePage()
 	if err != nil {
-		build.ExtendErr("Failed to create entryPage", err)
+		return nil, 0, build.ExtendErr("failed to allocate page for new entryPage", err)
+	}
+
+	// Create the first pageTable
+	root, err := newPageTable(p)
+	if err != nil {
+		return nil, 0, build.ExtendErr("Couldn't create new pageTable", err)
+	}
+
+	// Create the entryPage
+	ep := &entryPage{
+		pp:   pp,
+		pm:   p,
+		root: root,
+		mu:   new(sync.RWMutex),
+	}
+
+	// Initialize entryPage
+	if err := writeEntryPageEntry(pp, 0, 0, ep.pp.fileOff); err != nil {
+		return nil, 0, err
 	}
 
 	// Create a new entry
@@ -95,7 +111,12 @@ func (p *PageManager) Create() (*Entry, Identifier, error) {
 		ep: ep,
 	}
 
-	return newEntry, Identifier(ep.pp.fileOff), nil
+	// Increment the entryPage's counter and add it to the map
+	id := Identifier(ep.pp.fileOff)
+	p.entryPages[id] = ep
+	ep.instanceCounter++
+
+	return newEntry, id, nil
 }
 
 // loadFreePagesFromDisk loads the offsets of free pages from the first page of
@@ -154,7 +175,8 @@ func (p *PageManager) managedAllocatePage() (*physicalPage, error) {
 func New(filePath string) (*PageManager, error) {
 	// Create the page manager object
 	pm := &PageManager{
-		mu: new(sync.Mutex),
+		mu:         new(sync.Mutex),
+		entryPages: make(map[Identifier]*entryPage),
 	}
 
 	// Try to open the database file
@@ -189,7 +211,20 @@ func New(filePath string) (*PageManager, error) {
 
 // Open loads a previously created entry
 func (p *PageManager) Open(id Identifier) (*Entry, error) {
-	// Create the physicalPage object the identifier. We don't know
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Check if the identifier was opened before
+	if ep, exists := p.entryPages[id]; exists {
+		// Increase the instance counter of the entryPage
+		ep.instanceCounter++
+		return &Entry{
+			pm: p,
+			ep: ep,
+		}, nil
+	}
+
+	// Create the physicalPage object using the identifier. We don't know
 	// usedSize yet but for the entryPage we can just set it to pageSize
 	pp := &physicalPage{
 		file:     p.file,
@@ -223,20 +258,23 @@ func (p *PageManager) Open(id Identifier) (*Entry, error) {
 		pp:       pp,
 		usedSize: usedSize,
 		pm:       p,
+		mu:       new(sync.RWMutex),
 	}
 
 	// Recover the tree to get the pages of the entry
-	pages, err := ep.recoverTree(rootOff, height)
-	if err != nil {
+	if err := ep.recoverTree(rootOff, height); err != nil {
 		return nil, build.ExtendErr("Failed to recover tree", err)
 	}
 
 	// Create the entry
 	newEntry := &Entry{
-		pm:    p,
-		ep:    ep,
-		pages: pages,
+		pm: p,
+		ep: ep,
 	}
+
+	// Increment the entryPage's counter and add it to the map
+	p.entryPages[id] = ep
+	ep.instanceCounter++
 
 	return newEntry, nil
 }

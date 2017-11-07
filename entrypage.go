@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/NebulousLabs/Sia/build"
 )
@@ -24,36 +25,28 @@ type (
 
 		// pm is the pageManager
 		pm *PageManager
+
+		// atomicInstanceCounter counts the number of open references to the
+		// entryPage. It is increased in Open and decreased in Close
+		instanceCounter uint64
+
+		// pages is a list of all the physical pages of the tree
+		pages []*physicalPage
+
+		// mu is used to lock all operations on the entries
+		mu *sync.RWMutex
 	}
 )
 
-// newEnryPage is a helper function to create an entryPage
-func newEntryPage(pm *PageManager) (*entryPage, error) {
-	// Allocate a page for the table
-	pp, err := pm.allocatePage()
-	if err != nil {
-		return nil, build.ExtendErr("failed to allocate page for new entryPage", err)
-	}
-
-	// Create the first pageTable
-	root, err := newPageTable(pm)
-	if err != nil {
-		return nil, build.ExtendErr("Couldn't create new pageTable", err)
-	}
-
-	// Create and return the entryPage
-	ep := entryPage{
-		pp:   pp,
-		pm:   pm,
-		root: root,
-	}
-	return &ep, nil
-}
-
 // AddPages adds multiple physical pages to the tree and increments the
-// usedSize of the entryPage
+// usedSize of the entryPage. The ep.mu write lock needs to be acquired if
+// len(pages) > 0 otherwise the read lock will suffice
 func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
-	// Add the pages to the entryPage
+	if addedBytes == 0 {
+		return nil
+	}
+
+	// Otherwise add the pages to the entryPage
 	index := uint64(ep.usedSize / pageSize)
 	for _, page := range pages {
 		newRoot, err := ep.root.insertPage(index, page, ep.pm)
@@ -122,7 +115,7 @@ func readPageTable(pp *physicalPage) (entries []int64, err error) {
 
 // recoverTree recovers the pageTable tree recursively starting at the offset
 // of a pageTable
-func (ep *entryPage) recoverTree(rootOff int64, height int64) (pages []*physicalPage, err error) {
+func (ep *entryPage) recoverTree(rootOff int64, height int64) (err error) {
 	// Get the physicalPage for the rootOff
 	pp := &physicalPage{
 		file:     ep.pp.file,
@@ -141,7 +134,7 @@ func (ep *entryPage) recoverTree(rootOff int64, height int64) (pages []*physical
 
 	// Recover the tree recursively
 	remainingBytes := ep.usedSize
-	pages, err = recursiveRecovery(root, height, &remainingBytes)
+	ep.pages, err = recursiveRecovery(root, height, &remainingBytes)
 	if err != nil {
 		return
 	}

@@ -42,7 +42,8 @@ func (p *physicalPage) readAt(b []byte, off int64) (n int, err error) {
 	data := make([]byte, length)
 	n, err = p.file.ReadAt(data, p.fileOff+off)
 	if int64(n) != length {
-		panic(fmt.Sprintf("Sanity Check: ReadAt should have read %v bytes", length))
+		panic(fmt.Sprintf("Sanity Check: ReadAt should have read %v bytes instead of %v",
+			length, n))
 	}
 
 	copy(b, data)

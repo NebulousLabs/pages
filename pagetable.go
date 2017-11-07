@@ -2,6 +2,7 @@ package pages
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -34,8 +35,21 @@ type (
 // tree. It returns the current root of the tree since it might change. This
 // function is primarily intended to be used within addPage
 func (pt *pageTable) insertPage(index uint64, pp *physicalPage, pm *PageManager) (*pageTable, error) {
+	// Check if we need to extend the tree
+	maxPages := uint64(math.Pow(numPageEntries, float64(pt.height+1)))
+	if index >= maxPages {
+		newRoot, err := extendPageTableTree(pt, pm)
+		if err != nil {
+			return nil, build.ExtendErr("Failed to extend the pageTable tree", err)
+		}
+		return newRoot.insertPage(index, pp, pm)
+	}
+
 	// If height equals 0 the current pt is a leaf and we can add the page directly
-	if pt.height == 0 && len(pt.childPages) < numPageEntries {
+	if pt.height == 0 {
+		if len(pt.childPages) == numPageEntries {
+			panic(fmt.Sprintf("We shouldn't insert if childPages is already full: index %v", index))
+		}
 		// Add the page and update the table on disk
 		pt.childPages[index] = pp
 		if err := pt.writeToDisk(); err != nil {
@@ -50,20 +64,10 @@ func (pt *pageTable) insertPage(index uint64, pp *physicalPage, pm *PageManager)
 		return root, nil
 	}
 
-	// Check if we need to extend the tree
-	maxPages := uint64(math.Pow(numPageEntries, float64(pt.height+1)))
-	if index+1 > maxPages {
-		newRoot, err := extendPageTableTree(pt, pm)
-		if err != nil {
-			return nil, build.ExtendErr("Failed to extend the pageTable tree", err)
-		}
-		return newRoot.insertPage(index, pp, pm)
-	}
-
 	// Figure out which pageTable the page belongs to and call AddPage again
 	// with the adjusted index
 	tableIndex := index / numPageEntries
-	newIndex := index % numPageEntries
+	pageIndex := index % numPageEntries
 
 	// Check if the pageTable at tableIndex exists. If not, create it.
 	if _, exists := pt.childTables[tableIndex]; !exists {
@@ -83,7 +87,7 @@ func (pt *pageTable) insertPage(index uint64, pp *physicalPage, pm *PageManager)
 			return nil, err
 		}
 	}
-	return pt.childTables[tableIndex].insertPage(newIndex, pp, pm)
+	return pt.childTables[tableIndex].insertPage(pageIndex, pp, pm)
 }
 
 // newPageTable is a helper function to create a pageTable
