@@ -1,5 +1,7 @@
 package pages
 
+// TODO whenever usedSize changes update the entry on disk
+
 import (
 	"encoding/binary"
 	"errors"
@@ -11,9 +13,9 @@ import (
 )
 
 type (
-	// entryPage is the first page of an Entry. It points the pageTables of the
-	// entry and stores the used data of the pageTables.
-	entryPage struct {
+	// tieredPage is a page with an underlying pageTable tree. It stores pages
+	// and writes/loads them to/from disk
+	tieredPage struct {
 		// root contains the root of the pageTable tree
 		root *pageTable
 
@@ -26,15 +28,27 @@ type (
 		// pm is the pageManager
 		pm *PageManager
 
-		// atomicInstanceCounter counts the number of open references to the
-		// entryPage. It is increased in Open and decreased in Close
-		instanceCounter uint64
-
 		// pages is a list of all the physical pages of the tree
 		pages []*physicalPage
 
 		// mu is used to lock all operations on the entries
 		mu *sync.RWMutex
+	}
+
+	// entryPage is the first page of an Entry.
+	entryPage struct {
+		// entryPage is a tieredPage
+		*tieredPage
+
+		// atomicInstanceCounter counts the number of open references to the
+		// entryPage. It is increased in Open and decreased in Close
+		instanceCounter uint64
+	}
+
+	// recyclingPage is a tiered page that stores all the free pages
+	recyclingPage struct {
+		// recyclingPage is a tieredPage
+		*tieredPage
 	}
 )
 
@@ -47,11 +61,11 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 	}
 
 	// Otherwise add the pages to the entryPage
-	index := uint64(ep.usedSize / pageSize)
+	index := ep.len()
 	for _, page := range pages {
 		root := ep.root
 		if err := ep.insertPage(index, page); err != nil {
-			build.ExtendErr("failed to insert page", err)
+			return build.ExtendErr("failed to insert page", err)
 		}
 
 		// Check if root changed. If it did write down the entry for the last
@@ -72,9 +86,54 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 	return nil
 }
 
+// AddPages adds multiple physical pages to the tree and increments the
+// usedSize of the entryPage. The ep.mu write lock needs to be acquired if
+// len(pages) > 0 otherwise the read lock will suffice
+func (rp *recyclingPage) addPages(pages []*physicalPage, addedBytes int64) error {
+	if addedBytes == 0 {
+		return nil
+	}
+
+	// Stop recycling while pages are added
+	rp.pm.recyclePages = false
+	defer func() {
+		rp.pm.recyclePages = true
+	}()
+
+	// Otherwise add the pages to the entryPage
+	index := rp.len()
+	for _, page := range pages {
+		root := rp.root
+		if err := rp.insertPage(index, page); err != nil {
+			return build.ExtendErr("failed to insert page", err)
+		}
+
+		// Check if root changed. If it did write down the entry for the last
+		// root with it's max value for usedBytes before changing ep.root.
+		if root != rp.root {
+			bytesUsed := int64(maxPages(root.height) * pageSize)
+			writeEntryPageEntry(rp.pp, root.height, bytesUsed, root.pp.fileOff)
+		}
+		index++
+	}
+
+	// Increment the usedSize
+	rp.usedSize += addedBytes
+
+	// Write the root
+	writeEntryPageEntry(rp.pp, rp.root.height, rp.usedSize, rp.root.pp.fileOff)
+
+	return nil
+}
+
+// len returns the number of pages currently stored in the tree
+func (tp *tieredPage) len() uint64 {
+	return uint64(tp.usedSize / pageSize)
+}
+
 // maxPages return the number of pages the tree can contain
-func (ep *entryPage) maxPages() uint64 {
-	return maxPages(ep.root.height)
+func (tp *tieredPage) maxPages() uint64 {
+	return maxPages(tp.root.height)
 }
 
 // cap returns the number of pages a tree with a certain height can contain.
@@ -86,20 +145,20 @@ func maxPages(height int64) uint64 {
 
 // insertePage is a helper function that inserts a page into the pageTable
 // tree. It returns an error to indicate if the root changed.
-func (ep *entryPage) insertPage(index uint64, pp *physicalPage) error {
+func (tp *tieredPage) insertPage(index uint64, pp *physicalPage) error {
 	// Calculate the maximum number of pages the tree can contain at the moment
 	// If the index is too large we need to extend the tree before we can
 	// insert the page
-	for maxPages := ep.maxPages(); index >= maxPages; maxPages = ep.maxPages() {
-		newRoot, err := extendPageTableTree(ep.root, ep.pm)
+	for maxPages := tp.maxPages(); index >= maxPages; maxPages = tp.maxPages() {
+		newRoot, err := extendPageTableTree(tp.root, tp.pm)
 		if err != nil {
 			return build.ExtendErr("Failed to extend the pageTable tree", err)
 		}
-		ep.root = newRoot
+		tp.root = newRoot
 	}
 
 	// Search the tree for the correct pageTable to insert the page
-	pt := ep.root
+	pt := tp.root
 	var tableIndex uint64
 	var pageIndex = index
 	for pt.height > 0 {
@@ -109,7 +168,7 @@ func (ep *entryPage) insertPage(index uint64, pp *physicalPage) error {
 		// Check if the pageTable exists. If it doesn't, we have to create it
 		_, exists := pt.childTables[tableIndex]
 		if !exists {
-			newPt, err := newPageTable(pt.height-1, pt, ep.pm)
+			newPt, err := newPageTable(pt.height-1, pt, tp.pm)
 			if err != nil {
 				return build.ExtendErr("failed to create a new pageTable", err)
 			}
@@ -135,6 +194,72 @@ func (ep *entryPage) insertPage(index uint64, pp *physicalPage) error {
 		return err
 	}
 	return nil
+}
+
+// page returns a page at a given index from the tree
+// TODO Maybe delete this
+func (tp *tieredPage) page(index uint64) (*physicalPage, error) {
+	pt := tp.root
+	var tableIndex uint64
+	var pageIndex = index
+	var exists bool
+
+	// Loop until page is found
+	for pt.height > 0 {
+		tableIndex = pageIndex / maxPages(pt.height-1)
+		pageIndex /= numPageEntries
+		pt, exists = pt.childTables[tableIndex]
+		if !exists {
+			return nil, fmt.Errorf("table at index %v doesn't exist", tableIndex)
+		}
+	}
+
+	// Get the page
+	page, exists := pt.childPages[index%numPageEntries]
+	if !exists {
+		return nil, fmt.Errorf("page at index %v doesn't exist", pageIndex)
+	}
+	return page, nil
+}
+
+// removePage removes a page at a given index from the tree and returns the
+// deleted page
+func (tp *tieredPage) removePage(index uint64) (*physicalPage, error) {
+	pt := tp.root
+	var tableIndex uint64
+	var pageIndex = index
+	var exists bool
+
+	// Loop until page is found
+	for pt.height > 0 {
+		tableIndex = pageIndex / maxPages(pt.height-1)
+		pageIndex /= numPageEntries
+		pt, exists = pt.childTables[tableIndex]
+		if !exists {
+			return nil, fmt.Errorf("table at index %v doesn't exist", tableIndex)
+		}
+	}
+
+	// Sanity check if deleting the page is safe
+	if _, exists := pt.childPages[index%numPageEntries+1]; exists {
+		panic("deleting page would create a gap")
+	}
+
+	// Delete the page
+	page, exists := pt.childPages[index%numPageEntries]
+	if !exists {
+		return nil, fmt.Errorf("page at index %v doesn't exist", pageIndex)
+	}
+
+	delete(pt.childPages, index%numPageEntries)
+	tp.usedSize -= page.usedSize
+
+	// Write modified pageTable to disk
+	if err := pt.writeToDisk(); err != nil {
+		return nil, err
+	}
+	// TODO delete pageTable if it is empty
+	return page, nil
 }
 
 // readEntryPageEntry reads the usedBytes of a pageTable and a ptr to the
@@ -173,10 +298,10 @@ func readPageTable(pp *physicalPage) (entries []int64, err error) {
 
 // recoverTree recovers the pageTable tree recursively starting at the offset
 // of a pageTable
-func (ep *entryPage) recoverTree(rootOff int64, height int64) (err error) {
+func (tp *tieredPage) recoverTree(rootOff int64, height int64) (err error) {
 	// Get the physicalPage for the rootOff
 	pp := &physicalPage{
-		file:     ep.pp.file,
+		file:     tp.pp.file,
 		fileOff:  rootOff,
 		usedSize: pageSize,
 	}
@@ -191,13 +316,13 @@ func (ep *entryPage) recoverTree(rootOff int64, height int64) (err error) {
 	}
 
 	// Recover the tree recursively
-	remainingBytes := ep.usedSize
-	ep.pages, err = recursiveRecovery(root, height, &remainingBytes)
+	remainingBytes := tp.usedSize
+	tp.pages, err = recursiveRecovery(root, height, &remainingBytes)
 	if err != nil {
 		return
 	}
 
-	ep.root = root
+	tp.root = root
 	return
 }
 

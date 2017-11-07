@@ -182,11 +182,6 @@ func (e *Entry) Truncate(size int64) error {
 		return err
 	}
 
-	// Write the updated list of free pages to disk
-	if err := e.pm.writeFreePagesToDisk(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -215,7 +210,11 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 				delete(pt.childTables, i)
 
 				// Add its page to the free ones
-				e.pm.freePages = append(e.pm.freePages, child.pp)
+				child.pp.usedSize = pageSize
+				err := e.pm.freePages.addPages([]*physicalPage{child.pp}, child.pp.usedSize)
+				if err != nil {
+					return false, err
+				}
 
 				// Update pt on disk
 				if err := pt.writeToDisk(); err != nil {
@@ -260,7 +259,11 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 			}
 
 			// add the page to the pageManager's freePages
-			e.pm.freePages = append(e.pm.freePages, page)
+			page.usedSize = pageSize
+			err := e.pm.freePages.addPages([]*physicalPage{page}, page.usedSize)
+			if err != nil {
+				return false, nil
+			}
 
 			// Clear the removed page
 			e.ep.usedSize -= page.usedSize

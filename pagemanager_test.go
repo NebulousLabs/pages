@@ -110,12 +110,9 @@ func TestReadWriteFreePagesToDisk(t *testing.T) {
 		}
 		freePages[i] = pp
 	}
-	pt.pm.freePages = freePages
 
-	// Write them to disk
-	if err := pt.pm.writeFreePagesToDisk(); err != nil {
-		t.Errorf("Failed to write free pages: %v", err)
-	}
+	// TODO write data and free pages by calling truncate. Once done recover
+	t.Skip("TODO not done implementing")
 
 	// Delete them from memory
 	pt.pm.freePages = nil
@@ -126,16 +123,9 @@ func TestReadWriteFreePagesToDisk(t *testing.T) {
 	}
 
 	// Compare them
-	if len(pt.pm.freePages) != maxFreePagesStored {
-		t.Fatalf("length should be %v but was %v", maxFreePagesStored, len(pt.pm.freePages))
+	if int64(pt.pm.freePages.len()) != numPages {
+		t.Fatalf("length should be %v but was %v", numPages, pt.pm.freePages.len())
 	}
-	for i := int64(0); i < maxFreePagesStored; i++ {
-		if freePages[i].fileOff != pt.pm.freePages[i].fileOff {
-			t.Errorf("Fileoff was %v but should be %v",
-				pt.pm.freePages[i].fileOff, freePages[i].fileOff)
-		}
-	}
-
 }
 
 // TestRecovery tests if the data is still available after closing the

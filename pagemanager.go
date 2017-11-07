@@ -1,8 +1,6 @@
 package pages
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -22,7 +20,13 @@ type PageManager struct {
 	file *os.File
 
 	// freePages contains the pages that can be reused for new data
-	freePages []*physicalPage
+	freePages *recyclingPage
+
+	// TODO find a better way to do this
+	// recyclePages is used to indicate if it is safe to reuse free pages. This
+	// is used as a workaround to disable page recycling while pages are being
+	// inserted into freePages
+	recyclePages bool
 
 	// mu is a mutex to lock the PageManager's ressources
 	mu *sync.Mutex
@@ -36,11 +40,14 @@ type PageManager struct {
 func (p *PageManager) allocatePage() (*physicalPage, error) {
 	// If there are free pages available return one of those
 	var newPage *physicalPage
-	if len(p.freePages) > 0 {
-		newPage = p.freePages[0]
-		p.freePages = p.freePages[1:]
-		newPage.usedSize = 0
-		return newPage, nil
+	if p.recyclePages && p.freePages != nil && p.freePages.len() > 0 {
+		removedPage, err := p.freePages.removePage(p.freePages.len() - 1)
+		if err != nil {
+			return nil, build.ExtendErr("Failed to reuse free page", err)
+		}
+		removedPage.usedSize = 0
+		return removedPage, nil
+
 	}
 
 	// Get the fileOff for the page
@@ -95,10 +102,13 @@ func (p *PageManager) Create() (*Entry, Identifier, error) {
 
 	// Create the entryPage
 	ep := &entryPage{
-		pp:   pp,
-		pm:   p,
-		root: root,
-		mu:   new(sync.RWMutex),
+		&tieredPage{
+			pp:   pp,
+			pm:   p,
+			root: root,
+			mu:   new(sync.RWMutex),
+		},
+		0,
 	}
 
 	// Initialize entryPage
@@ -123,45 +133,52 @@ func (p *PageManager) Create() (*Entry, Identifier, error) {
 // loadFreePagesFromDisk loads the offsets of free pages from the first page of
 // the file.
 func (p *PageManager) loadFreePagesFromDisk() error {
-	// Read the whole page. We need to check for EOF in case the filesize is
-	// smaller than pageSize which might happen if the PageManager is created
-	// and closed before writing any files to it other than the initial free
-	// pages
-	pageData := make([]byte, pageSize)
-	if n, err := p.file.ReadAt(pageData, freePagesOffset); err != nil && !(err == io.EOF && n > 8) {
-		return err
+	// Create the physicalPage object using the identifier. We don't know
+	// usedSize yet but for the entryPage we can just set it to pageSize
+	pp := &physicalPage{
+		file:     p.file,
+		fileOff:  freeOff,
+		usedSize: pageSize,
 	}
 
-	// off is an offset used for unmarshalling the pageData
-	off := 0
-
-	// Unmarshal number of entries
-	numEntries := binary.LittleEndian.Uint64(pageData[off : off+8])
-	off += 8
-
-	// Check if the remaining data is big enough to hold numEntries entries
-	if uint64(len(pageData[off:])) < 8*numEntries {
-		panic(fmt.Sprintf("Sanity check failed. %v < %v", len(pageData[off:]), 8*numEntries))
-	}
-
-	for i := uint64(0); i < numEntries; i++ {
-		// Unmarshal page offset
-		offset, bytesRead := binary.Varint(pageData[off : off+8])
-		if offset == 0 && bytesRead <= 0 {
-			return errors.New("Failed to unmarshal offset")
+	// Read all the entries from the entryPage and remember the root and usedSize
+	rootOff := int64(0)
+	usedSize := int64(0)
+	height := int64(0)
+	var err error
+	for i := 0; i < pageSize/entryPageEntrySize; i++ {
+		usedSize, rootOff, err = readEntryPageEntry(pp, int64(i))
+		if err != nil {
+			return build.ExtendErr("Failed to read entry", err)
 		}
-		off += 8
+		// Remember the reached height
+		height = int64(i)
 
-		// Create physicalPage object
-		pp := &physicalPage{
-			file:    p.file,
-			fileOff: offset,
+		// Stop if we find a root that isn't full yet
+		numPages := int64(math.Pow(float64(numPageEntries), float64(i+1)))
+		if usedSize < numPages*pageSize {
+			break
 		}
-
-		// Append it to the pageManager
-		p.freePages = append(p.freePages, pp)
 	}
+
+	// Create the entryPage object and recover the tree.
+	ep := &recyclingPage{
+		&tieredPage{
+			pp:       pp,
+			usedSize: usedSize,
+			pm:       p,
+			mu:       new(sync.RWMutex),
+		},
+	}
+
+	// Recover the tree to get the pages of the entry
+	if err := ep.recoverTree(rootOff, height); err != nil {
+		return build.ExtendErr("Failed to recover tree", err)
+	}
+
+	p.freePages = ep
 	return nil
+
 }
 
 // managedAllocatePage either returns a free page or allocates a page and adds
@@ -176,8 +193,9 @@ func (p *PageManager) managedAllocatePage() (*physicalPage, error) {
 func New(filePath string) (*PageManager, error) {
 	// Create the page manager object
 	pm := &PageManager{
-		mu:         new(sync.Mutex),
-		entryPages: make(map[Identifier]*entryPage),
+		mu:           new(sync.Mutex),
+		entryPages:   make(map[Identifier]*entryPage),
+		recyclePages: true,
 	}
 
 	// Try to open the database file
@@ -202,10 +220,25 @@ func New(filePath string) (*PageManager, error) {
 	}
 	pm.file = file
 
-	// Init the free pages metadata
-	if err := pm.writeFreePagesToDisk(); err != nil {
-		return nil, build.ExtendErr("Failed to write free page to disk", err)
+	// Create the pageEntry for the free pages
+	root, err := newPageTable(0, nil, pm)
+	if err != nil {
+		return nil, build.ExtendErr("Couldn't create new pageTable", err)
 	}
+	pp := &physicalPage{
+		file:     pm.file,
+		fileOff:  freeOff,
+		usedSize: pageSize,
+	}
+	rp := &recyclingPage{
+		&tieredPage{
+			pp:   pp,
+			pm:   pm,
+			root: root,
+			mu:   new(sync.RWMutex),
+		},
+	}
+	pm.freePages = rp
 
 	return pm, nil
 }
@@ -256,10 +289,13 @@ func (p *PageManager) Open(id Identifier) (*Entry, error) {
 
 	// Create the entryPage object and recover the tree.
 	ep := &entryPage{
-		pp:       pp,
-		usedSize: usedSize,
-		pm:       p,
-		mu:       new(sync.RWMutex),
+		&tieredPage{
+			pp:       pp,
+			usedSize: usedSize,
+			pm:       p,
+			mu:       new(sync.RWMutex),
+		},
+		0,
 	}
 
 	// Recover the tree to get the pages of the entry
@@ -278,37 +314,4 @@ func (p *PageManager) Open(id Identifier) (*Entry, error) {
 	ep.instanceCounter++
 
 	return newEntry, nil
-}
-
-// writeFreePagesToDisk writes the offsets of the freePages of the pageManager
-// to disk on the first page of the file
-func (p *PageManager) writeFreePagesToDisk() error {
-	// Get the number of pages we are about to write to disk
-	numPages := uint64(len(p.freePages))
-	if numPages > maxFreePagesStored {
-		numPages = maxFreePagesStored
-	}
-
-	// off is an offset that is used for the marshalling of the data
-	off := 0
-
-	// Allocate memory for the marshalled data
-	dataLen := (numPages + 1) * 8
-	data := make([]byte, dataLen)
-
-	// Marshal the number of pages
-	binary.LittleEndian.PutUint64(data[off:8], numPages)
-	off += 8
-
-	// Marshal each pages offset
-	for i := uint64(0); i < numPages; i++ {
-		binary.PutVarint(data[off:off+8], p.freePages[i].fileOff)
-		off += 8
-	}
-
-	// Write data to disk
-	if _, err := p.file.WriteAt(data, freePagesOffset); err != nil {
-		return err
-	}
-	return nil
 }

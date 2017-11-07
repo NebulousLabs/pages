@@ -11,8 +11,11 @@ const (
 	// point to. 8 bytes for the number of entries and 8 for each entry
 	numPageEntries = (pageSize - 8) / 8.0
 
+	// freeOff is the offset of the freePages entryPage relative to the start
+	// of the file
+	freeOff = 0
+
 	// dataOff is the offset of the data relative to the start of the file.
-	// Everything before that is metadata
 	dataOff = 1 * pageSize
 
 	// freePagesOffset is the offset at which the free pages of the pageManager
@@ -20,8 +23,4 @@ const (
 	// maxFreePagesStored pages can be stored there but the defrag thread is
 	// constantly looking for new pages
 	freePagesOffset = 0
-
-	// maxFreePagesStored is the maximum amount of free pages that can be
-	// persisted on disk.
-	maxFreePagesStored = (pageSize - 8) / 8
 )
