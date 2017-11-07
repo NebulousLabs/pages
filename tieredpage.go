@@ -399,7 +399,7 @@ func unmarshalPageTable(data []byte) (entries []int64, err error) {
 	off := 0
 
 	// Unmarshal the number of entries in the table
-	numEntries := binary.LittleEndian.Uint64(data[0:8])
+	numEntries := binary.LittleEndian.Uint64(data[off:8])
 	off += 8
 
 	// Sanity check numEntries

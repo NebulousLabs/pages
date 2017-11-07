@@ -63,7 +63,7 @@ func TestAllocatePage(t *testing.T) {
 	defer pt.Close()
 
 	// Allocate numPages pages
-	numPages := 10000
+	numPages := 10
 	pages := make([]*physicalPage, numPages)
 	for i := 0; i < numPages; i++ {
 		page, err := pt.pm.managedAllocatePage()
@@ -80,15 +80,15 @@ func TestAllocatePage(t *testing.T) {
 	}
 
 	// Check filesize afterwards
-	if stats.Size() != int64(numPages*pageSize+dataOff) {
+	if stats.Size() != int64(numPages*pageSize+dataOff+pageSize) {
 		t.Errorf("Filesize should be %v, but was %v", numPages*pageSize+dataOff, stats.Size())
 	}
 
 	// Check if fields were set correctly
 	for i := 0; i < numPages; i++ {
-		if pages[i].fileOff != int64(i*pageSize+dataOff) {
-			t.Errorf("Page %v has wrong offset. Was %v, but should be %v",
-				i, pages[i].fileOff, i*pageSize+dataOff)
+		if pages[i].fileOff != int64(i*pageSize+dataOff+pageSize) {
+			t.Fatalf("Page %v has wrong offset. Was %v, but should be %v",
+				i, pages[i].fileOff, i*pageSize+dataOff+pageSize)
 		}
 	}
 }
@@ -101,18 +101,30 @@ func TestReadWriteFreePagesToDisk(t *testing.T) {
 	}
 	defer pt.Close()
 
-	// Add more free pages than the first page can actually hold
-	numPages := int64(10000)
-	freePages := make([]*physicalPage, numPages)
-	for i := int64(0); i < numPages; i++ {
-		pp := &physicalPage{
-			fileOff: i * pageSize,
-		}
-		freePages[i] = pp
+	// Create enry
+	entry, _, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// TODO write data and free pages by calling truncate. Once done recover
-	t.Skip("TODO not done implementing")
+	// Write numPages of data
+	numPages := uint64(10000)
+	if _, err := entry.Write(fastrand.Bytes(int(numPages * pageSize))); err != nil {
+		t.Fatalf("Failed to write data to disk: %v", err)
+	}
+
+	// Truncate file to 0 bytes
+	if err := entry.Truncate(0); err != nil {
+		t.Fatalf("Failed to truncate file to 0 bytes")
+	}
+
+	// Check number of free pages. There should be numPages pages plus the
+	// pageTables that were allocated and are no longer needed.
+	expectedPages := numPages + uint64(numPages/numPageEntries+1)
+	if pt.pm.freePages.len() != expectedPages {
+		t.Errorf("There should be %v free pages but there were %v",
+			expectedPages, pt.pm.freePages.len())
+	}
 
 	// Delete them from memory
 	pt.pm.freePages = nil
@@ -123,8 +135,9 @@ func TestReadWriteFreePagesToDisk(t *testing.T) {
 	}
 
 	// Compare them
-	if int64(pt.pm.freePages.len()) != numPages {
-		t.Fatalf("length should be %v but was %v", numPages, pt.pm.freePages.len())
+	if pt.pm.freePages.len() != expectedPages {
+		t.Errorf("There should be %v free pages but there were %v",
+			expectedPages, pt.pm.freePages.len())
 	}
 }
 

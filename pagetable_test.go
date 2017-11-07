@@ -31,7 +31,7 @@ func TestMarshalLoad(t *testing.T) {
 	}
 
 	// Marshal the underlying root table
-	data, err := entry.ep.root.Marshal()
+	data, err := entry.ep.root.marshal()
 	if err != nil {
 		t.Errorf("Failed to marshal pageTable: %v", err)
 	}

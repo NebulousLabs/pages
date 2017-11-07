@@ -62,6 +62,11 @@ func (p *PageManager) allocatePage() (*physicalPage, error) {
 		fileOff += (pageSize - fileOff%pageSize)
 	}
 
+	// Don't start before dataOff
+	if fileOff < dataOff {
+		fileOff = dataOff
+	}
+
 	// Create the new page and write it to disk
 	newPage = &physicalPage{
 		file:    p.file,
@@ -220,22 +225,21 @@ func New(filePath string) (*PageManager, error) {
 	}
 	pm.file = file
 
-	// Create the pageEntry for the free pages
+	// Create the pageEntry for the free pages.
 	root, err := newPageTable(0, nil, pm)
 	if err != nil {
-		return nil, build.ExtendErr("Couldn't create new pageTable", err)
-	}
-	pp := &physicalPage{
-		file:     pm.file,
-		fileOff:  freeOff,
-		usedSize: pageSize,
+		return nil, build.ExtendErr("Failed to create pageTable for recycling page", err)
 	}
 	rp := &recyclingPage{
 		&tieredPage{
-			pp:   pp,
 			pm:   pm,
 			root: root,
 			mu:   new(sync.RWMutex),
+			pp: &physicalPage{
+				file:     pm.file,
+				fileOff:  freeOff,
+				usedSize: pageSize,
+			},
 		},
 	}
 	pm.freePages = rp

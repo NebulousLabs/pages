@@ -70,8 +70,8 @@ func extendPageTableTree(root *pageTable, pm *PageManager) (*pageTable, error) {
 	return newRoot, nil
 }
 
-// Marshal serializes a pageTable to be able to write it to disk
-func (pt pageTable) Marshal() ([]byte, error) {
+// marshal serializes a pageTable to be able to write it to disk
+func (pt pageTable) marshal() ([]byte, error) {
 	// Get the number of entries and the offsets of the entries
 	var numEntries uint64
 	var offsets []int64
@@ -109,7 +109,7 @@ func (pt pageTable) Marshal() ([]byte, error) {
 // writeToDisk marshals a pageTable and writes it to disk
 func (pt pageTable) writeToDisk() error {
 	// Marshal the pageTable
-	data, err := pt.Marshal()
+	data, err := pt.marshal()
 	if err != nil {
 		return build.ExtendErr("Failed to marshal pageTable", err)
 	}
@@ -119,7 +119,6 @@ func (pt pageTable) writeToDisk() error {
 	if err != nil {
 		return build.ExtendErr("Failed to write pageTable to disk", err)
 	}
-
 	return nil
 }
 
