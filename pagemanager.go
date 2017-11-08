@@ -151,7 +151,7 @@ func (p *PageManager) loadFreePagesFromDisk() error {
 	usedSize := int64(0)
 	height := int64(0)
 	var err error
-	for i := 0; i < pageSize/entryPageEntrySize; i++ {
+	for i := 0; i < pageSize/tieredPageEntrySize; i++ {
 		usedSize, rootOff, err = readEntryPageEntry(pp, int64(i))
 		if err != nil {
 			return build.ExtendErr("Failed to read entry", err)
@@ -275,7 +275,7 @@ func (p *PageManager) Open(id Identifier) (*Entry, error) {
 	usedSize := int64(0)
 	height := int64(0)
 	var err error
-	for i := 0; i < pageSize/entryPageEntrySize; i++ {
+	for i := 0; i < pageSize/tieredPageEntrySize; i++ {
 		usedSize, rootOff, err = readEntryPageEntry(pp, int64(i))
 		if err != nil {
 			return nil, build.ExtendErr("Failed to read entry", err)

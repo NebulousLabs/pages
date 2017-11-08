@@ -4,8 +4,8 @@ const (
 	// pageSize is the size in bytes of a physical page on disk
 	pageSize = 4096
 
-	// entryPageEntrySize is the size of an entry in the entryPage
-	entryPageEntrySize = 16
+	// tieredPageEntrySize is the size of an entry in the entryPage
+	tieredPageEntrySize = 16
 
 	// numPageEntries is the number of entries that a marshalled pageTable can
 	// point to. 8 bytes for the number of entries and 8 for each entry

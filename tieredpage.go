@@ -358,8 +358,8 @@ func (rp *recyclingPage) freePage() (*physicalPage, error) {
 // pageTable at a specific offset of a page from disk
 func readEntryPageEntry(pp *physicalPage, index int64) (usedBytes int64, pageOff int64, err error) {
 	// Read the data from disk
-	entryData := make([]byte, entryPageEntrySize)
-	_, err = pp.readAt(entryData, index*entryPageEntrySize)
+	entryData := make([]byte, tieredPageEntrySize)
+	_, err = pp.readAt(entryData, index*tieredPageEntrySize)
 	if err != nil {
 		return
 	}
@@ -614,14 +614,14 @@ func unmarshalPageTable(data []byte) (entries []int64, err error) {
 // writeTieredPageEntry writes the usedBytes of a pageTable and a ptr to the
 // pageTable at a specific offset in the entryPage
 func writeTieredPageEntry(pp *physicalPage, index int64, usedBytes int64, pageOff int64) error {
-	data := make([]byte, entryPageEntrySize)
+	data := make([]byte, tieredPageEntrySize)
 
 	// Marshal usedBytes and pageOff
 	binary.PutVarint(data[0:8], usedBytes)
 	binary.PutVarint(data[8:], pageOff)
 
 	// Write the data to disk
-	if _, err := pp.writeAt(data, index*entryPageEntrySize); err != nil {
+	if _, err := pp.writeAt(data, index*tieredPageEntrySize); err != nil {
 		return err
 	}
 	return nil
