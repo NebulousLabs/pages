@@ -89,11 +89,7 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 // AddPages adds multiple physical pages to the tree and increments the
 // usedSize of the entryPage. The ep.mu write lock needs to be acquired if
 // len(pages) > 0 otherwise the read lock will suffice
-func (rp *recyclingPage) addPages(pages []*physicalPage, addedBytes int64) error {
-	if addedBytes == 0 {
-		return nil
-	}
-
+func (rp *recyclingPage) addPages(pages []*physicalPage) error {
 	// Stop recycling while pages are added
 	rp.pm.recyclePages = false
 	defer func() {
@@ -103,6 +99,9 @@ func (rp *recyclingPage) addPages(pages []*physicalPage, addedBytes int64) error
 	// Otherwise add the pages to the entryPage
 	index := rp.len()
 	for _, page := range pages {
+		// free pages are treated as if they were full
+		page.usedSize = pageSize
+
 		root := rp.root
 		if err := rp.insertPage(index, page); err != nil {
 			return build.ExtendErr("failed to insert page", err)
@@ -120,7 +119,7 @@ func (rp *recyclingPage) addPages(pages []*physicalPage, addedBytes int64) error
 	}
 
 	// Increment the usedSize
-	rp.usedSize += addedBytes
+	rp.usedSize += int64(len(pages)) * pageSize
 
 	// Write the root
 	return writeTieredPageEntry(rp.pp, rp.root.height, rp.usedSize, rp.root.pp.fileOff)
@@ -136,13 +135,38 @@ func (tp *tieredPage) defrag() error {
 	}
 
 	// Defrag until the root node has multiple children
+	var err error
+	var pagesToFree []*physicalPage
 	for tp.root.height > 0 && len(tp.root.childTables) == 1 {
-		// TODO change root in tieredPage
+		child := tp.root.childTables[0]
 
-		// TODO free root
+		// Write the previous pageEntry's entry
+		err = writeTieredPageEntry(tp.pp, child.height, tp.usedSize, child.pp.fileOff)
+		if err != nil {
+			return err
+		}
+
+		// Zero out the current entry
+		err = writeTieredPageEntry(tp.pp, tp.root.height, 0, 0)
+		if err != nil {
+			return err
+		}
+
+		// remember to free current root page. We can't do it right away since
+		// there is a chance that the tieredPage's root changes when we call
+		// addPages
+		pagesToFree = append(pagesToFree, tp.root.pp)
 
 		// change root to its child
 		tp.root = tp.root.childTables[0]
+	}
+
+	// Free pages
+	// TODO this might cause pages to get lost if a power outage occurs after
+	// modifying the tieredPage but before freeing the pages
+	err = tp.pm.freePages.addPages(pagesToFree)
+	if err != nil {
+		return err
 	}
 	return nil
 }

@@ -211,8 +211,7 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 				delete(pt.childTables, i)
 
 				// Add its page to the free ones
-				child.pp.usedSize = pageSize
-				err := e.pm.freePages.addPages([]*physicalPage{child.pp}, child.pp.usedSize)
+				err := e.pm.freePages.addPages([]*physicalPage{child.pp})
 				if err != nil {
 					return false, err
 				}
@@ -260,8 +259,7 @@ func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
 			}
 
 			// add the page to the pageManager's freePages
-			page.usedSize = pageSize
-			err := e.pm.freePages.addPages([]*physicalPage{page}, page.usedSize)
+			err := e.pm.freePages.addPages([]*physicalPage{page})
 			if err != nil {
 				return false, nil
 			}
