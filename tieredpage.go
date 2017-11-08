@@ -118,6 +118,9 @@ func (rp *recyclingPage) addPages(pages []*physicalPage) error {
 		index++
 	}
 
+	// Add pages to rp.pages
+	rp.pages = append(rp.pages, pages...)
+
 	// Increment the usedSize
 	rp.usedSize += int64(len(pages)) * pageSize
 
@@ -269,11 +272,22 @@ func (tp *tieredPage) page(index uint64) (*physicalPage, error) {
 
 // removePage removes a page at a given index from the tree and returns the
 // deleted page
-func (tp *tieredPage) removePage(index uint64) (*physicalPage, error) {
-	pt := tp.root
+// TODO this function is similar to truncate. Maybe there is a way to call
+// recursiveTruncate here. Currently this is not possible since
+// recursiveTruncate instantly adds pages to the free pages tree which results
+// in weird behavior.
+func (rp *recyclingPage) freePage() (*physicalPage, error) {
+	pt := rp.root
+	var index = rp.len() - 1
 	var tableIndex uint64
 	var pageIndex = index
 	var exists bool
+
+	// Stop recycling while pages are added
+	rp.pm.recyclePages = false
+	defer func() {
+		rp.pm.recyclePages = true
+	}()
 
 	// Loop until page is found
 	for pt.height > 0 {
@@ -297,14 +311,48 @@ func (tp *tieredPage) removePage(index uint64) (*physicalPage, error) {
 	}
 
 	delete(pt.childPages, index%numPageEntries)
-	tp.usedSize -= page.usedSize
+	rp.usedSize -= page.usedSize
 
 	// Write modified pageTable to disk
 	if err := pt.writeToDisk(); err != nil {
 		return nil, err
 	}
-	// TODO delete pageTable if it is empty
-	return page, tp.defrag()
+
+	// If there are no more pages left and pt is not the root we can delete the
+	// pageTable
+	var pagesToFree []*physicalPage
+	if pt.parent != nil && len(pt.childPages) == 0 {
+		// Add its page to the free ones
+		pagesToFree = append(pagesToFree, pt.pp)
+
+		// Update the parent on disk
+		delete(pt.parent.childTables, uint64(len(pt.parent.childTables)-1))
+		if err := pt.parent.writeToDisk(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Go through the parents and delete empty ones
+	for pt = pt.parent; pt.parent != nil && len(pt.childTables) == 0; pt = pt.parent {
+		// Add its page to the free ones
+		pagesToFree = append(pagesToFree, pt.pp)
+
+		// Update the parent on disk
+		delete(pt.parent.childTables, uint64(len(pt.parent.childTables)-1))
+		if err := pt.parent.writeToDisk(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Sanity check if last page of rp.pages equals the removed page
+	if page != rp.pages[len(rp.pages)-1] {
+		panic("removed page isn't the same as the last page in rp.pages")
+	}
+
+	// Remove the last page from rp.pages
+	rp.pages = rp.pages[:len(rp.pages)-1]
+
+	return page, nil
 }
 
 // readEntryPageEntry reads the usedBytes of a pageTable and a ptr to the
@@ -431,6 +479,99 @@ func recursiveRecovery(parent *pageTable, height int64, remainingBytes *int64) (
 	}
 
 	return
+}
+
+// recursiveTruncate is a helper function that recursively walks over the
+// allocated pages and deletes them until a certain size is reached
+func (tp *tieredPage) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
+	// Call recursiveTruncate on child tables
+	if pt.height > 0 {
+		for i := uint64(len(pt.childTables)) - 1; i >= 0; i-- {
+			// Stop if entry is small enough
+			if tp.usedSize <= size {
+				return false, nil
+			}
+
+			// Otherwise call truncate recursively
+			empty, err := tp.recursiveTruncate(pt.childTables[i], size)
+			if err != nil {
+				return false, err
+			}
+
+			// If the child is empty now we can remove it from the tree and
+			// free its page
+			if empty {
+				// Delete and clear the child
+				child := pt.childTables[i]
+				delete(pt.childTables, i)
+
+				// Add its page to the free ones
+				err := tp.pm.freePages.addPages([]*physicalPage{child.pp})
+				if err != nil {
+					return false, err
+				}
+
+				// Update pt on disk
+				if err := pt.writeToDisk(); err != nil {
+					return false, err
+				}
+
+				// If the parent is now empty too return
+				if len(pt.childTables) == 0 {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	// Start removing pages
+	if pt.height == 0 {
+		for i := uint64(len(pt.childPages)) - 1; i >= 0; i-- {
+			// Stop if entry is small enough
+			if tp.usedSize <= size {
+				return false, nil
+			}
+			page := pt.childPages[i]
+
+			// Check if we need to remove the whole page or if we can just
+			// truncate it
+			remainingTruncation := tp.usedSize - size
+			if remainingTruncation < page.usedSize {
+				page.usedSize = page.usedSize - remainingTruncation
+				tp.usedSize -= remainingTruncation
+				continue
+			}
+
+			// Remove the page from the entry's pages and the pageTable
+			delete(pt.childPages, i)
+			removed := tp.pages[len(tp.pages)-1]
+			tp.pages = tp.pages[:len(tp.pages)-1]
+
+			// Sanity check. Removed pages should be the same
+			if removed.fileOff != page.fileOff {
+				panic(fmt.Sprintf("removed pages weren't the same %v != %v",
+					removed.fileOff, page.fileOff))
+			}
+
+			// add the page to the pageManager's freePages
+			err := tp.pm.freePages.addPages([]*physicalPage{page})
+			if err != nil {
+				return false, nil
+			}
+
+			// Clear the removed page
+			tp.usedSize -= page.usedSize
+
+			// If the childTables are empty we can return right away
+			if len(pt.childPages) == 0 {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	// sanity check height
+	panic("sanity check failed. height can't be a negative value.")
 }
 
 // unmarshalPageTable a pageTable

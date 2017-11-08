@@ -2,7 +2,6 @@ package pages
 
 import (
 	"errors"
-	"fmt"
 	"io"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -178,105 +177,12 @@ func (e *Entry) Truncate(size int64) error {
 	defer e.ep.mu.Unlock()
 
 	// Recursively truncate the tree
-	if _, err := e.recursiveTruncate(e.ep.root, size); err != nil {
+	if _, err := e.ep.recursiveTruncate(e.ep.root, size); err != nil {
 		return err
 	}
 
 	// Defrag the tree afterwards
 	return e.ep.defrag()
-}
-
-// recursiveTruncate is a helper function that recursively walks over the
-// allocated pages and deletes them until a certain size is reached
-func (e *Entry) recursiveTruncate(pt *pageTable, size int64) (bool, error) {
-	// Call recursiveTruncate on child tables
-	if pt.height > 0 {
-		for i := uint64(len(pt.childTables)) - 1; i >= 0; i-- {
-			// Stop if entry is small enough
-			if e.ep.usedSize <= size {
-				return false, nil
-			}
-
-			// Otherwise call truncate recursively
-			empty, err := e.recursiveTruncate(pt.childTables[i], size)
-			if err != nil {
-				return false, err
-			}
-
-			// If the child is empty now we can remove it from the tree and
-			// free its page
-			if empty {
-				// Delete and clear the child
-				child := pt.childTables[i]
-				delete(pt.childTables, i)
-
-				// Add its page to the free ones
-				err := e.pm.freePages.addPages([]*physicalPage{child.pp})
-				if err != nil {
-					return false, err
-				}
-
-				// Update pt on disk
-				if err := pt.writeToDisk(); err != nil {
-					return false, err
-				}
-
-				// If the parent is now empty too return
-				if len(pt.childTables) == 0 {
-					return true, nil
-				}
-			}
-		}
-	}
-
-	// Start removing pages
-	if pt.height == 0 {
-		for i := uint64(len(pt.childPages)) - 1; i >= 0; i-- {
-			// Stop if entry is small enough
-			if e.ep.usedSize <= size {
-				return false, nil
-			}
-			page := pt.childPages[i]
-
-			// Check if we need to remove the whole page or if we can just
-			// truncate it
-			remainingTruncation := e.ep.usedSize - size
-			if remainingTruncation < page.usedSize {
-				page.usedSize = page.usedSize - remainingTruncation
-				e.ep.usedSize -= remainingTruncation
-				continue
-			}
-
-			// Remove the page from the entry's pages and the pageTable
-			delete(pt.childPages, i)
-			removed := e.ep.pages[len(e.ep.pages)-1]
-			e.ep.pages = e.ep.pages[:len(e.ep.pages)-1]
-
-			// Sanity check. Removed pages should be the same
-			if removed.fileOff != page.fileOff {
-				panic(fmt.Sprintf("removed pages weren't the same %v != %v",
-					removed.fileOff, page.fileOff))
-			}
-
-			// add the page to the pageManager's freePages
-			err := e.pm.freePages.addPages([]*physicalPage{page})
-			if err != nil {
-				return false, nil
-			}
-
-			// Clear the removed page
-			e.ep.usedSize -= page.usedSize
-
-			// If the childTables are empty we can return right away
-			if len(pt.childPages) == 0 {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-
-	// sanity check height
-	panic("sanity check failed. height can't be a negative value.")
 }
 
 // write is a helper function that writes at a specific cursorPage and offset
