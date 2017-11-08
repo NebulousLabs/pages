@@ -117,7 +117,7 @@ func (p *PageManager) Create() (*Entry, Identifier, error) {
 	}
 
 	// Initialize entryPage
-	if err := writeEntryPageEntry(pp, 0, 0, ep.pp.fileOff); err != nil {
+	if err := writeTieredPageEntry(pp, 0, 0, ep.pp.fileOff); err != nil {
 		return nil, 0, err
 	}
 

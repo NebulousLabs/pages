@@ -72,7 +72,9 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 		// root with it's max value for usedBytes before changing ep.root.
 		if root != ep.root {
 			bytesUsed := int64(maxPages(root.height) * pageSize)
-			writeEntryPageEntry(ep.pp, root.height, bytesUsed, root.pp.fileOff)
+			if err := writeTieredPageEntry(ep.pp, root.height, bytesUsed, root.pp.fileOff); err != nil {
+				return err
+			}
 		}
 		index++
 	}
@@ -81,9 +83,7 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 	ep.usedSize += addedBytes
 
 	// Write the root
-	writeEntryPageEntry(ep.pp, ep.root.height, ep.usedSize, ep.root.pp.fileOff)
-
-	return nil
+	return writeTieredPageEntry(ep.pp, ep.root.height, ep.usedSize, ep.root.pp.fileOff)
 }
 
 // AddPages adds multiple physical pages to the tree and increments the
@@ -112,7 +112,9 @@ func (rp *recyclingPage) addPages(pages []*physicalPage, addedBytes int64) error
 		// root with it's max value for usedBytes before changing ep.root.
 		if root != rp.root {
 			bytesUsed := int64(maxPages(root.height) * pageSize)
-			writeEntryPageEntry(rp.pp, root.height, bytesUsed, root.pp.fileOff)
+			if err := writeTieredPageEntry(rp.pp, root.height, bytesUsed, root.pp.fileOff); err != nil {
+				return err
+			}
 		}
 		index++
 	}
@@ -121,8 +123,27 @@ func (rp *recyclingPage) addPages(pages []*physicalPage, addedBytes int64) error
 	rp.usedSize += addedBytes
 
 	// Write the root
-	writeEntryPageEntry(rp.pp, rp.root.height, rp.usedSize, rp.root.pp.fileOff)
+	return writeTieredPageEntry(rp.pp, rp.root.height, rp.usedSize, rp.root.pp.fileOff)
+}
 
+// defrag needs to be called after entry operation that possibly removes
+// pageTables from the tree. Itwrites the current usedSize to disk and reduces
+// the height of the tree if possible.
+func (tp *tieredPage) defrag() error {
+	// Write current usedSize to disk
+	if err := writeTieredPageEntry(tp.pp, tp.root.height, tp.usedSize, tp.root.pp.fileOff); err != nil {
+		return err
+	}
+
+	// Defrag until the root node has multiple children
+	for tp.root.height > 0 && len(tp.root.childTables) == 1 {
+		// TODO change root in tieredPage
+
+		// TODO free root
+
+		// change root to its child
+		tp.root = tp.root.childTables[0]
+	}
 	return nil
 }
 
@@ -259,7 +280,7 @@ func (tp *tieredPage) removePage(index uint64) (*physicalPage, error) {
 		return nil, err
 	}
 	// TODO delete pageTable if it is empty
-	return page, nil
+	return page, tp.defrag()
 }
 
 // readEntryPageEntry reads the usedBytes of a pageTable and a ptr to the
@@ -426,9 +447,9 @@ func unmarshalPageTable(data []byte) (entries []int64, err error) {
 	return
 }
 
-// writeEntryPageEntry writes the usedBytes of a pageTable and a ptr to the
+// writeTieredPageEntry writes the usedBytes of a pageTable and a ptr to the
 // pageTable at a specific offset in the entryPage
-func writeEntryPageEntry(pp *physicalPage, index int64, usedBytes int64, pageOff int64) error {
+func writeTieredPageEntry(pp *physicalPage, index int64, usedBytes int64, pageOff int64) error {
 	data := make([]byte, entryPageEntrySize)
 
 	// Marshal usedBytes and pageOff

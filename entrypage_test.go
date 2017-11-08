@@ -22,7 +22,7 @@ func TestWriteReadPageEntryPageEntry(t *testing.T) {
 	offset := int64(0)
 	usedBytes := int64(100)
 	pageOff := int64(4096)
-	if err := writeEntryPageEntry(pp, offset, usedBytes, pageOff); err != nil {
+	if err := writeTieredPageEntry(pp, offset, usedBytes, pageOff); err != nil {
 		t.Errorf("Failed to write entry: %v", err)
 	}
 

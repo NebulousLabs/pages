@@ -182,7 +182,8 @@ func (e *Entry) Truncate(size int64) error {
 		return err
 	}
 
-	return nil
+	// Defrag the tree afterwards
+	return e.ep.defrag()
 }
 
 // recursiveTruncate is a helper function that recursively walks over the
