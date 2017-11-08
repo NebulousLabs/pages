@@ -117,7 +117,6 @@ func (rp *recyclingPage) addPages(pages []*physicalPage) error {
 		}
 		index++
 	}
-
 	// Add pages to rp.pages
 	rp.pages = append(rp.pages, pages...)
 
@@ -352,7 +351,7 @@ func (rp *recyclingPage) freePage() (*physicalPage, error) {
 	// Remove the last page from rp.pages
 	rp.pages = rp.pages[:len(rp.pages)-1]
 
-	return page, nil
+	return page, rp.defrag()
 }
 
 // readEntryPageEntry reads the usedBytes of a pageTable and a ptr to the

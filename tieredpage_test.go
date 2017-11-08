@@ -91,6 +91,53 @@ func TestAddPage(t *testing.T) {
 	}
 }
 
+// TestDefrag tests the functionality of the tieredPage's defrag call
+func TestDefrag(t *testing.T) {
+	// Get a paging tester
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get a new entry
+	entry, _, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write data to the entry
+	numPages := int(numPageEntries + 1)
+	_, err = entry.Write(fastrand.Bytes(numPages * pageSize))
+	if err != nil {
+		t.Errorf("Failed to write data: %v", err)
+	}
+
+	// Truncate data
+	if err := entry.Truncate(0); err != nil {
+		t.Errorf("Failed to truncate data: %v", err)
+	}
+
+	// The tree should only consist of the root node now
+	if len(entry.ep.root.childPages) != 0 || len(entry.ep.root.childTables) != 0 {
+		t.Errorf("Too many nodes. childPages %v childTables %v",
+			len(entry.ep.root.childPages), len(entry.ep.root.childTables))
+	}
+
+	if entry.ep.usedSize != 0 {
+		t.Errorf("Used size should be %v but was %v", 0, entry.ep.usedSize)
+	}
+
+	if len(entry.ep.pages) != 0 {
+		t.Errorf("Len pages should be %v but was %v", 0, len(entry.ep.pages))
+	}
+
+	// There should be numPages + 2 (for the pagetables) free pages now
+	if len(pt.pm.freePages.pages) != numPages+2 {
+		t.Logf("expected free pages %v but was %v",
+			numPageEntries+2, len(pt.pm.freePages.pages))
+	}
+}
+
 // TestInsertPage tests the funtionality of the pageTable's InsertPage call
 func TestInsertPage(t *testing.T) {
 	// Get a paging tester
