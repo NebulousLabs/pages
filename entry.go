@@ -182,7 +182,13 @@ func (e *Entry) Truncate(size int64) error {
 	}
 
 	// Defrag the tree afterwards
-	return e.ep.defrag()
+	pagesToFree, err := e.ep.defrag()
+	if err != nil {
+		return err
+	}
+
+	// Free pages
+	return e.pm.freePages.addPages(pagesToFree)
 }
 
 // write is a helper function that writes at a specific cursorPage and offset

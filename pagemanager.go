@@ -174,6 +174,7 @@ func (p *PageManager) loadFreePagesFromDisk() error {
 			pm:       p,
 			mu:       new(sync.RWMutex),
 		},
+		nil,
 	}
 
 	// Recover the tree to get the pages of the entry
@@ -241,6 +242,7 @@ func New(filePath string) (*PageManager, error) {
 				usedSize: pageSize,
 			},
 		},
+		nil,
 	}
 	pm.freePages = rp
 

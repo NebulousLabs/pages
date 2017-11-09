@@ -163,9 +163,15 @@ func TestFreePage(t *testing.T) {
 		t.Errorf("Failed to truncate entry: %v", err)
 	}
 
-	freePages := len(entry.pm.freePages.pages)
-	for i := 0; i < freePages; i++ {
-		expectedPage := entry.pm.freePages.pages[len(entry.pm.freePages.pages)-1]
+	freePages := entry.pm.freePages
+	var expectedPage *physicalPage
+	for len(freePages.pagesToFree)+len(freePages.pages) > 0 {
+		// If buffer is not empty we expect a buffered page
+		if len(freePages.pagesToFree) > 0 {
+			expectedPage = freePages.pagesToFree[len(freePages.pagesToFree)-1]
+		} else {
+			expectedPage = freePages.pages[len(freePages.pages)-1]
+		}
 		newPage, err := entry.pm.freePages.freePage()
 		if err != nil {
 			t.Fatalf("Failed to free page: %v", newPage)
@@ -173,9 +179,11 @@ func TestFreePage(t *testing.T) {
 		if expectedPage != newPage {
 			t.Errorf("Returned page didn't match expected page")
 		}
-		// TODO also check if the number of remainin
-		// len(enetry.pm.freePages.pages) is correct.
-		// TODO change freePage to allow the tree to actually shrink
+	}
+
+	// Check if all free pages are used
+	if len(freePages.pagesToFree)+len(freePages.pages) != 0 {
+		t.Errorf("there should be no more free pages")
 	}
 }
 

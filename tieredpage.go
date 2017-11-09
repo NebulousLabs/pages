@@ -49,6 +49,11 @@ type (
 	recyclingPage struct {
 		// recyclingPage is a tieredPage
 		*tieredPage
+
+		// pagesToFree is a buffer that is filled with pageTables that are
+		// freed during the process of getting a free page from the
+		// recyclingPage.
+		pagesToFree []*physicalPage
 	}
 )
 
@@ -128,12 +133,13 @@ func (rp *recyclingPage) addPages(pages []*physicalPage) error {
 }
 
 // defrag needs to be called after entry operation that possibly removes
-// pageTables from the tree. Itwrites the current usedSize to disk and reduces
-// the height of the tree if possible.
-func (tp *tieredPage) defrag() error {
+// pageTables from the tree. It writes the current usedSize to disk and reduces
+// the height of the tree if possible. Pages freed during defrag will be
+// returned.
+func (tp *tieredPage) defrag() ([]*physicalPage, error) {
 	// Write current usedSize to disk
 	if err := writeTieredPageEntry(tp.pp, tp.root.height, tp.usedSize, tp.root.pp.fileOff); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Defrag until the root node has multiple children
@@ -145,13 +151,13 @@ func (tp *tieredPage) defrag() error {
 		// Write the previous pageEntry's entry
 		err = writeTieredPageEntry(tp.pp, child.height, tp.usedSize, child.pp.fileOff)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		// Zero out the current entry
 		err = writeTieredPageEntry(tp.pp, tp.root.height, 0, 0)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		// remember to free current root page. We can't do it right away since
@@ -161,16 +167,10 @@ func (tp *tieredPage) defrag() error {
 
 		// change root to its child
 		tp.root = tp.root.childTables[0]
+		tp.root.parent = nil
 	}
 
-	// Free pages
-	// TODO this might cause pages to get lost if a power outage occurs after
-	// modifying the tieredPage but before freeing the pages
-	err = tp.pm.freePages.addPages(pagesToFree)
-	if err != nil {
-		return err
-	}
-	return nil
+	return pagesToFree, nil
 }
 
 // len returns the number of pages currently stored in the tree
@@ -282,6 +282,13 @@ func (rp *recyclingPage) freePage() (*physicalPage, error) {
 	var pageIndex = index
 	var exists bool
 
+	// Use buffered pages first
+	if len(rp.pagesToFree) > 0 {
+		p := rp.pagesToFree[len(rp.pagesToFree)-1]
+		rp.pagesToFree = rp.pagesToFree[:len(rp.pagesToFree)-1]
+		return p, nil
+	}
+
 	// Stop recycling while pages are added
 	rp.pm.recyclePages = false
 	defer func() {
@@ -319,10 +326,9 @@ func (rp *recyclingPage) freePage() (*physicalPage, error) {
 
 	// If there are no more pages left and pt is not the root we can delete the
 	// pageTable
-	var pagesToFree []*physicalPage
 	if pt.parent != nil && len(pt.childPages) == 0 {
 		// Add its page to the free ones
-		pagesToFree = append(pagesToFree, pt.pp)
+		rp.pagesToFree = append(rp.pagesToFree, pt.pp)
 
 		// Update the parent on disk
 		delete(pt.parent.childTables, uint64(len(pt.parent.childTables)-1))
@@ -332,9 +338,9 @@ func (rp *recyclingPage) freePage() (*physicalPage, error) {
 	}
 
 	// Go through the parents and delete empty ones
-	for pt = pt.parent; pt.parent != nil && len(pt.childTables) == 0; pt = pt.parent {
+	for pt = pt.parent; pt != nil && pt.parent != nil && len(pt.childTables) == 0; pt = pt.parent {
 		// Add its page to the free ones
-		pagesToFree = append(pagesToFree, pt.pp)
+		rp.pagesToFree = append(rp.pagesToFree, pt.pp)
 
 		// Update the parent on disk
 		delete(pt.parent.childTables, uint64(len(pt.parent.childTables)-1))
@@ -351,12 +357,14 @@ func (rp *recyclingPage) freePage() (*physicalPage, error) {
 	// Remove the last page from rp.pages
 	rp.pages = rp.pages[:len(rp.pages)-1]
 
-	// Add the freed pages
-	if err := rp.addPages(pagesToFree); err != nil {
+	// Defrag the tree
+	freePages, err := rp.defrag()
+	if err != nil {
 		return nil, err
 	}
 
-	return page, rp.defrag()
+	rp.pagesToFree = append(rp.pagesToFree, freePages...)
+	return page, nil
 }
 
 // readEntryPageEntry reads the usedBytes of a pageTable and a ptr to the
