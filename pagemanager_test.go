@@ -121,9 +121,9 @@ func TestReadWriteFreePagesToDisk(t *testing.T) {
 	// Check number of free pages. There should be numPages pages plus the
 	// pageTables that were allocated and are no longer needed.
 	expectedPages := numPages + uint64(numPages/numPageEntries+1)
-	if pt.pm.freePages.len() != expectedPages {
+	if pt.pm.freePages.nextIndex() != expectedPages {
 		t.Errorf("There should be %v free pages but there were %v",
-			expectedPages, pt.pm.freePages.len())
+			expectedPages, pt.pm.freePages.nextIndex())
 	}
 
 	// Delete them from memory
@@ -135,9 +135,9 @@ func TestReadWriteFreePagesToDisk(t *testing.T) {
 	}
 
 	// Compare them
-	if pt.pm.freePages.len() != expectedPages {
+	if pt.pm.freePages.nextIndex() != expectedPages {
 		t.Errorf("There should be %v free pages but there were %v",
-			expectedPages, pt.pm.freePages.len())
+			expectedPages, pt.pm.freePages.nextIndex())
 	}
 }
 

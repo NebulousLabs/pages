@@ -303,9 +303,9 @@ func TestTruncate(t *testing.T) {
 
 	// The remaining pages should be in the freePages slice
 	freedPageTables := int64(pages/numPageEntries) + 1
-	if int64(pt.pm.freePages.len()) != int64(pages)-expectedPages+freedPageTables {
+	if int64(pt.pm.freePages.nextIndex()) != int64(pages)-expectedPages+freedPageTables {
 		t.Errorf("there should be %v free pages but there are %v",
-			int64(pages)-expectedPages+freedPageTables, pt.pm.freePages.len())
+			int64(pages)-expectedPages+freedPageTables, pt.pm.freePages.nextIndex())
 	}
 
 	// Make sure the data wasn't corrupted

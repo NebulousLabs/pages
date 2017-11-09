@@ -66,12 +66,12 @@ func (ep *entryPage) addPages(pages []*physicalPage, addedBytes int64) error {
 	}
 
 	// Sanity check length of ep.pages
-	if int(ep.len())+len(pages) != len(ep.pages) {
+	if int(ep.nextIndex())+len(pages) != len(ep.pages) {
 		panic("ep.pages should already contain the updated number of pages")
 	}
 
 	// Add the pages to the entryPage
-	index := ep.len()
+	index := ep.nextIndex()
 	for _, page := range pages {
 		root := ep.root
 		if err := ep.insertPage(index, page); err != nil {
@@ -110,7 +110,7 @@ func (rp *recyclingPage) addPages(pages []*physicalPage) error {
 	rp.pages = append(rp.pages, pages...)
 
 	// Otherwise add the pages to the entryPage
-	index := rp.len()
+	index := rp.nextIndex()
 	for _, page := range pages {
 		// free pages are treated as if they were full
 		page.usedSize = pageSize
@@ -183,8 +183,9 @@ func (rp *recyclingPage) availablePages() int {
 	return len(rp.pagesToFree) + len(rp.pages)
 }
 
-// len returns the number of pages currently stored in the tree
-func (tp *tieredPage) len() uint64 {
+// nextIndex returns the next index that can be used to insert a page into the
+// tiered page
+func (tp *tieredPage) nextIndex() uint64 {
 	return uint64(tp.usedSize / pageSize)
 }
 
@@ -251,32 +252,6 @@ func (tp *tieredPage) insertPage(index uint64, pp *physicalPage) error {
 		return err
 	}
 	return nil
-}
-
-// page returns a page at a given index from the tree
-// TODO Maybe delete this
-func (tp *tieredPage) page(index uint64) (*physicalPage, error) {
-	pt := tp.root
-	var tableIndex uint64
-	var pageIndex = index
-	var exists bool
-
-	// Loop until page is found
-	for pt.height > 0 {
-		tableIndex = pageIndex / maxPages(pt.height-1)
-		pageIndex /= numPageEntries
-		pt, exists = pt.childTables[tableIndex]
-		if !exists {
-			return nil, fmt.Errorf("table at index %v doesn't exist", tableIndex)
-		}
-	}
-
-	// Get the page
-	page, exists := pt.childPages[index%numPageEntries]
-	if !exists {
-		return nil, fmt.Errorf("page at index %v doesn't exist", pageIndex)
-	}
-	return page, nil
 }
 
 // removePage removes a page at a given index from the tree and returns the
