@@ -351,6 +351,11 @@ func (rp *recyclingPage) freePage() (*physicalPage, error) {
 	// Remove the last page from rp.pages
 	rp.pages = rp.pages[:len(rp.pages)-1]
 
+	// Add the freed pages
+	if err := rp.addPages(pagesToFree); err != nil {
+		return nil, err
+	}
+
 	return page, rp.defrag()
 }
 

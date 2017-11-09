@@ -138,6 +138,47 @@ func TestDefrag(t *testing.T) {
 	}
 }
 
+// TestFreePage checks if getting free pages from the recyclingPage works as expected.
+func TestFreePage(t *testing.T) {
+	// Get a paging tester
+	pt, err := newPagingTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get a new entry
+	entry, _, err := pt.pm.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write numPageEntries + 1 pages to the entry
+	numPages := int(numPageEntries + 1)
+	if _, err := entry.Write(fastrand.Bytes(numPages * pageSize)); err != nil {
+		t.Errorf("Failed to write pages: %v", err)
+	}
+
+	// Free all the pages again
+	if err := entry.Truncate(0); err != nil {
+		t.Errorf("Failed to truncate entry: %v", err)
+	}
+
+	freePages := len(entry.pm.freePages.pages)
+	for i := 0; i < freePages; i++ {
+		expectedPage := entry.pm.freePages.pages[len(entry.pm.freePages.pages)-1]
+		newPage, err := entry.pm.freePages.freePage()
+		if err != nil {
+			t.Fatalf("Failed to free page: %v", newPage)
+		}
+		if expectedPage != newPage {
+			t.Errorf("Returned page didn't match expected page")
+		}
+		// TODO also check if the number of remainin
+		// len(enetry.pm.freePages.pages) is correct.
+		// TODO change freePage to allow the tree to actually shrink
+	}
+}
+
 // TestInsertPage tests the funtionality of the pageTable's InsertPage call
 func TestInsertPage(t *testing.T) {
 	// Get a paging tester
