@@ -40,12 +40,11 @@ type PageManager struct {
 func (p *PageManager) allocatePage() (*physicalPage, error) {
 	// If there are free pages available return one of those
 	var newPage *physicalPage
-	if p.recyclePages && p.freePages != nil && p.freePages.len() > 0 {
+	if p.recyclePages && p.freePages != nil && p.freePages.availablePages() > 0 {
 		removedPage, err := p.freePages.freePage()
 		if err != nil {
 			return nil, build.ExtendErr("Failed to reuse free page", err)
 		}
-		removedPage.usedSize = 0
 		return removedPage, nil
 
 	}

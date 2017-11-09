@@ -174,7 +174,7 @@ func TestFreePage(t *testing.T) {
 		}
 		newPage, err := entry.pm.freePages.freePage()
 		if err != nil {
-			t.Fatalf("Failed to free page: %v", newPage)
+			t.Fatalf("Failed to free page: %v", err)
 		}
 		if expectedPage != newPage {
 			t.Errorf("Returned page didn't match expected page")

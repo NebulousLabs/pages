@@ -177,18 +177,19 @@ func (e *Entry) Truncate(size int64) error {
 	defer e.ep.mu.Unlock()
 
 	// Recursively truncate the tree
-	if _, err := e.ep.recursiveTruncate(e.ep.root, size); err != nil {
+	_, pagesToFree1, err := e.ep.recursiveTruncate(e.ep.root, size)
+	if err != nil {
 		return err
 	}
 
 	// Defrag the tree afterwards
-	pagesToFree, err := e.ep.defrag()
+	pagesToFree2, err := e.ep.defrag()
 	if err != nil {
 		return err
 	}
 
 	// Free pages
-	return e.pm.freePages.addPages(pagesToFree)
+	return e.pm.freePages.addPages(append(pagesToFree1, pagesToFree2...))
 }
 
 // write is a helper function that writes at a specific cursorPage and offset
