@@ -213,6 +213,7 @@ func New(filePath string) (*PageManager, error) {
 		if err := pm.loadFreePagesFromDisk(); err != nil {
 			return nil, build.ExtendErr("failed to read free pages", err)
 		}
+		return pm, nil
 	} else if !os.IsNotExist(err) {
 		// The file exists but cannot be opened
 		return nil, build.ExtendErr("Failed to open existing database file", err)
